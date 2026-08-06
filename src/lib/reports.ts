@@ -228,7 +228,7 @@ export interface PipelineResult {
   metricsInserted: number;
   /** Metrics skipped as duplicates. */
   metricsDuplicates: number;
-  /** Gemini AI analysis, when the AI stage succeeded. */
+  /** AI analysis, when the AI stage succeeded. */
   ai: AiInsight | null;
   /** True when the AI stage failed — OCR + metrics are still saved. */
   aiUnavailable: boolean;
@@ -257,11 +257,11 @@ export interface RunPipelineParams {
  * - extracting: real OCR (download from storage → Tesseract/pdf.js), then
  *   the Medical Data Parser turns the extracted text into structured metrics
  *   persisted into health_metrics (duplicates ignored).
- * - analyzing: Feature 3 — the Gemini AI analysis. Only the OCR text and the
- *   parsed metrics are sent (never the PDF/image), via the secure Convex
- *   action. On ANY AI failure the pipeline still completes: OCR text and
- *   metrics remain saved and the UI shows "AI Analysis currently
- *   unavailable."
+ * - analyzing: Feature 3 — the AI analysis. Only the OCR text and the parsed
+ *   metrics are sent (never the PDF/image), via the secure Convex action
+ *   (Gemini primary, OpenRouter automatic fallback). On ANY AI failure the
+ *   pipeline still completes: OCR text and metrics remain saved and the UI
+ *   shows "AI Analysis currently unavailable."
  * - APBE: after a successful run, every personal baseline is recomputed
  *   automatically from health_metrics (never blocks or fails the pipeline).
  * - OCR/parse failures mark the report `failed` and rethrow a structured
@@ -309,7 +309,7 @@ export async function runProcessingPipeline(
     `Parsed ${metrics.length} metric${metrics.length === 1 ? "" : "s"} · ${inserted} stored`,
   );
 
-  // AI analysis stage (Feature 3) — secure Gemini call through Convex.
+  // AI analysis stage (Feature 3) — secure AI call through Convex.
   onStatus("analyzing");
   await updateReportProcessingStatus(reportId, "analyzing");
 
@@ -325,6 +325,7 @@ export async function runProcessingPipeline(
         insight: outcome.insight,
         raw: outcome.raw,
         model: outcome.model,
+        provider: outcome.provider,
         processingTimeMs: outcome.processingTimeMs,
       });
       onOcrProgress?.("AI analysis ready");

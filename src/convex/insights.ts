@@ -1,11 +1,17 @@
 "use node";
 
 /**
- * AI Medical Report Analysis (Feature 3) — secure Google Gemini integration.
+ * AI Medical Report Analysis (Feature 3) — secure AI integration.
  *
- * This action is the ONLY place the Gemini API key lives: it is read from
- * process.env.GEMINI_API_KEY on the Convex server and is never exposed to the
- * browser. The frontend never calls Gemini directly — it invokes this action.
+ * This action is the ONLY place the AI keys live: they are read from
+ * process.env on the Convex server and never exposed to the browser. The
+ * frontend never calls an LLM directly — it invokes this action.
+ *
+ * The actual LLM call goes through the shared `aiProvider` module
+ * (src/convex/aiProvider.ts): Gemini is the primary provider and OpenRouter is
+ * the automatic fallback when Gemini hits quota (HTTP 429 / RESOURCE_EXHAUSTED),
+ * a 5xx, a timeout, a network error, or an invalid key/model. Both providers
+ * return the exact same schema, so the response shape never changes.
  *
  * Security model:
  *  - The caller's Supabase access token is verified server-side against the
@@ -13,57 +19,27 @@
  *  - The report's OCR text and parsed metrics are re-read server-side through
  *    PostgREST using the caller's own JWT, so existing Row Level Security
  *    policies enforce ownership — a user can only analyze their own reports.
- *  - Only ocr_text + health_metrics are sent to Gemini. The original PDF/image
- *    is never transmitted.
- *
- * Resilience: Gemini's free tier throttles with HTTP 429 (and capacity blips
- * with 503). `fetchWithGeminiRetry` retries those responses with the delay
- * Google itself suggests (capped), so transient limits self-heal; a genuinely
- * exhausted DAILY quota still returns `rate_limited` with an honest message.
+ *  - Only ocr_text + health_metrics are sent to the provider. The original
+ *    PDF/image is never transmitted.
  *
  * Environment variables (set in the Keys tab / Convex env):
- *   GEMINI_API_KEY       — Google AI Studio API key (required)
+ *   GEMINI_API_KEY       — Google AI Studio API key (primary provider)
+ *   GEMINI_MODEL         — optional, default "gemini-3.6-flash"
+ *   OPENROUTER_API_KEY   — OpenRouter API key (automatic fallback provider)
+ *   OPENROUTER_MODEL     — optional, default "qwen/qwen3-235b-a22b:free"
  *   SUPABASE_URL         — e.g. https://<project>.supabase.co (required)
  *   SUPABASE_ANON_KEY    — publishable anon key (required, used with the user JWT)
- *   GEMINI_MODEL         — optional, default "gemini-3.6-flash"
  */
 
 import { action } from "./_generated/server";
 import { v } from "convex/values";
+import {
+  generateWithProviderFallback,
+  mapProviderFailure,
+  type AiProvider,
+} from "./aiProvider";
 
-const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta";
-const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash";
-const GEMINI_TIMEOUT_MS = 75_000;
 const MAX_OCR_CHARS = 5_000;
-const MAX_GEMINI_RETRIES = 2;
-const MAX_RETRY_DELAY_MS = 15_000;
-
-/**
- * Fetches Gemini, retrying 429 (quota/rate) and 503 (transient capacity).
- * Uses Google's own "Please retry in Xs" hint when present, capped at
- * MAX_RETRY_DELAY_MS so the action can never stall too long.
- */
-async function fetchWithGeminiRetry(url: string, init: RequestInit): Promise<Response> {
-  let lastRes: Response | null = null;
-  for (let attempt = 0; attempt <= MAX_GEMINI_RETRIES; attempt += 1) {
-    const res = await fetch(url, init);
-    if (res.status !== 429 && res.status !== 503) return res;
-    lastRes = res;
-    if (attempt < MAX_GEMINI_RETRIES) {
-      const body = await res.clone().text().catch(() => "");
-      const match = body.match(/retry in ([0-9.]+)s/i);
-      const serverDelay = match ? Math.round(parseFloat(match[1]) * 1000) : 0;
-      const delay = serverDelay > 0 ? serverDelay : 3_000 * (attempt + 1);
-      await new Promise((resolve) => setTimeout(resolve, Math.min(delay, MAX_RETRY_DELAY_MS)));
-    }
-  }
-  return lastRes as Response;
-}
-
-/** Human explanation for free-tier quota exhaustion (the common 429 cause). */
-const QUOTA_EXHAUSTED_MESSAGE =
-  "The AI service's free-tier request quota is used up for today (Gemini free keys allow ~20 requests/day). " +
-  "It resets daily — try again later, or add a Gemini API key with billing enabled in the Keys tab.";
 
 const SYSTEM_PROMPT = `You are an experienced physician helping patients understand their medical reports.
 
@@ -106,17 +82,16 @@ export const generate = action({
   handler: async (_ctx, args) => {
     const supabaseUrl = process.env.SUPABASE_URL?.replace(/\/+$/, "");
     const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
-    const geminiKey = process.env.GEMINI_API_KEY;
 
     const fail = (
       code: AiErrorCode,
       message: string,
     ): AiActionResult => ({ ok: false, code, message });
 
-    if (!geminiKey) {
+    if (!process.env.GEMINI_API_KEY && !process.env.OPENROUTER_API_KEY) {
       return fail(
         "not_configured",
-        "GEMINI_API_KEY is not set. Add it in the Keys tab (Convex env).",
+        "No AI provider is configured. Add GEMINI_API_KEY or OPENROUTER_API_KEY in the Keys tab (Convex env).",
       );
     }
     if (!supabaseUrl || !supabaseAnonKey) {
@@ -191,8 +166,8 @@ export const generate = action({
       );
     }
 
-    // 4. Call Gemini with both the OCR text and the structured metrics.
-    const model = process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+    // 4. Call the AI provider layer (Gemini → OpenRouter fallback) with both
+    //    the OCR text and the structured metrics.
     const userMessage = [
       "Please analyze this medical report.",
       "",
@@ -206,95 +181,23 @@ export const generate = action({
     ].join("\n");
 
     const startedAt = Date.now();
-    let rawContent = "";
-    let finishReason = "";
-    try {
-      const res = await fetchWithGeminiRetry(
-        `${GEMINI_ENDPOINT}/models/${model}:generateContent?key=${encodeURIComponent(geminiKey)}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
-            contents: [{ role: "user", parts: [{ text: userMessage }] }],
-            generationConfig: {
-              temperature: 0.3,
-              maxOutputTokens: 4096,
-              responseMimeType: "application/json",
-            },
-          }),
-          signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
-        },
-      );
+    const result = await generateWithProviderFallback({
+      systemPrompt: SYSTEM_PROMPT,
+      userMessage,
+      temperature: 0.3,
+      maxOutputTokens: 4096,
+      jsonMode: true,
+    });
 
-      if (res.status === 429) {
-        return fail("rate_limited", QUOTA_EXHAUSTED_MESSAGE);
-      }
-      if (res.status === 404) {
-        return fail(
-          "model_error",
-          `The Gemini model "${model}" was not found (HTTP 404). Set GEMINI_MODEL in the Keys tab to a model your key can use.`,
-        );
-      }
-      if (res.status === 400 || res.status === 401 || res.status === 403) {
-        const errText = await res.text().catch(() => "");
-        // A 400 can mean an invalid model name rather than an invalid key —
-        // report that distinctly so the two are never conflated.
-        if (/not found|not supported|does not exist|not available|invalid model/i.test(errText)) {
-          return fail(
-            "model_error",
-            `The Gemini model "${model}" was rejected (HTTP ${res.status}): ${errText.slice(0, 200)}`,
-          );
-        }
-        return fail(
-          "not_configured",
-          "The Gemini API key was rejected. Please check GEMINI_API_KEY in the Keys tab.",
-        );
-      }
-      if (!res.ok) {
-        const errText = await res.text().catch(() => "");
-        return fail(
-          "server",
-          `The AI service returned an error (HTTP ${res.status})${
-            errText ? `: ${errText.slice(0, 200)}` : ""
-          }.`,
-        );
-      }
-
-      const body = (await res.json()) as {
-        candidates?: Array<{
-          content?: { parts?: Array<{ text?: string }> };
-          finishReason?: string;
-        }>;
-        promptFeedback?: { blockReason?: string };
-      };
-
-      const candidates = body.candidates;
-      if (!Array.isArray(candidates) || candidates.length === 0) {
-        const blockReason = body.promptFeedback?.blockReason;
-        return fail(
-          "invalid_json",
-          `The AI returned no content${
-            blockReason ? ` (blocked by safety filter: ${blockReason})` : ""
-          }. Please try again.`,
-        );
-      }
-
-      // Thinking models return a "thought" part BEFORE the JSON part, so we
-      // must read every part — never just parts[0].
-      const parts = candidates[0]?.content?.parts ?? [];
-      rawContent = parts
-        .map((part) => (typeof part?.text === "string" ? part.text : ""))
-        .join("\n");
-      finishReason = candidates[0]?.finishReason ?? "";
-    } catch (err) {
-      const name = err instanceof Error ? err.name : "";
-      if (name === "TimeoutError" || name === "AbortError" || /timeout/i.test(String(err))) {
-        return fail("timeout", "The AI took too long to respond. Please try again.");
-      }
-      return fail("network", "Could not reach the AI service. Check your connection.");
+    if (!result.ok) {
+      const mapped = mapProviderFailure(result);
+      return fail(mapped.code, mapped.message);
     }
 
+    const rawContent = result.text;
+    const finishReason = result.finishReason ?? "";
+    const model = result.model;
+    const provider: AiProvider = result.provider;
     const processingTimeMs = Date.now() - startedAt;
 
     // 5. Parse + validate the JSON analysis. Extract from each part in turn
@@ -316,6 +219,7 @@ export const generate = action({
       insight,
       raw: rawContent,
       model,
+      provider,
       processingTimeMs,
     };
   },
@@ -328,6 +232,7 @@ export interface AiActionResult {
   insight?: AiInsight;
   raw?: string;
   model?: string;
+  provider?: AiProvider;
   processingTimeMs?: number;
 }
 

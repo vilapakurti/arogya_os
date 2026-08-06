@@ -1,7 +1,7 @@
 "use node";
 
 /**
- * Doctor Copilot (AI Visit Assistant) — secure Google Gemini action.
+ * Doctor Copilot (AI Visit Assistant) — secure AI action.
  *
  * Produces the "AI Consultation Brief": a plain-language briefing that helps a
  * patient prepare for a doctor visit, generated from their own health history.
@@ -10,60 +10,38 @@
  * improving/worsening metrics, milestones, abnormal findings) is computed on
  * the client by src/lib/copilot.ts using the shared timeline/trends/APBE
  * modules. This action only receives those already-computed, non-sensitive
- * statistics plus the previous AI summaries, and asks Gemini for the
+ * statistics plus the previous AI summaries, and asks the LLM for the
  * consultation narrative. It never touches ai_insights and never modifies any
  * table — it is read/stateless.
+ *
+ * The LLM call goes through the shared `aiProvider` module
+ * (src/convex/aiProvider.ts): Gemini primary, OpenRouter automatic fallback on
+ * quota (429 / RESOURCE_EXHAUSTED), 5xx, timeout, network, or invalid
+ * key/model. The response schema is identical regardless of provider.
  *
  * Security model (mirrors insights.ts / baselines.ts):
  *  - The caller's Supabase access token is verified server-side against the
  *    Supabase Auth endpoint.
  *  - Only computed numeric statistics + short text summaries are sent — never
  *    raw report files or OCR text.
- *  - The Gemini API key lives only in process.env on the Convex server.
- *
- * Resilience: Gemini's free tier throttles with HTTP 429 (and capacity blips
- * with 503). `fetchWithGeminiRetry` retries those responses with the delay
- * Google itself suggests (capped); a genuinely exhausted DAILY quota still
- * returns `rate_limited` with an honest message.
+ *  - The AI keys live only in process.env on the Convex server.
  *
  * Environment variables (Keys tab / Convex env):
- *   GEMINI_API_KEY       — Google AI Studio API key (required)
+ *   GEMINI_API_KEY       — Google AI Studio API key (primary provider)
+ *   GEMINI_MODEL         — optional, default "gemini-3.6-flash"
+ *   OPENROUTER_API_KEY   — OpenRouter API key (automatic fallback provider)
+ *   OPENROUTER_MODEL     — optional, default "qwen/qwen3-235b-a22b:free"
  *   SUPABASE_URL         — e.g. https://<project>.supabase.co (required)
  *   SUPABASE_ANON_KEY    — publishable anon key (required, used with the user JWT)
- *   GEMINI_MODEL         — optional, default "gemini-3.6-flash"
  */
 
 import { action } from "./_generated/server";
 import { v } from "convex/values";
-
-const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta";
-const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash";
-const GEMINI_TIMEOUT_MS = 75_000;
-const MAX_GEMINI_RETRIES = 2;
-const MAX_RETRY_DELAY_MS = 15_000;
-
-/** Retries 429/503 Gemini responses, honoring Google's "retry in Xs" hint. */
-async function fetchWithGeminiRetry(url: string, init: RequestInit): Promise<Response> {
-  let lastRes: Response | null = null;
-  for (let attempt = 0; attempt <= MAX_GEMINI_RETRIES; attempt += 1) {
-    const res = await fetch(url, init);
-    if (res.status !== 429 && res.status !== 503) return res;
-    lastRes = res;
-    if (attempt < MAX_GEMINI_RETRIES) {
-      const body = await res.clone().text().catch(() => "");
-      const match = body.match(/retry in ([0-9.]+)s/i);
-      const serverDelay = match ? Math.round(parseFloat(match[1]) * 1000) : 0;
-      const delay = serverDelay > 0 ? serverDelay : 3_000 * (attempt + 1);
-      await new Promise((resolve) => setTimeout(resolve, Math.min(delay, MAX_RETRY_DELAY_MS)));
-    }
-  }
-  return lastRes as Response;
-}
-
-/** Human explanation for free-tier quota exhaustion (the common 429 cause). */
-const QUOTA_EXHAUSTED_MESSAGE =
-  "The AI service's free-tier request quota is used up for today (Gemini free keys allow ~20 requests/day). " +
-  "It resets daily — try again later, or add a Gemini API key with billing enabled in the Keys tab.";
+import {
+  generateWithProviderFallback,
+  mapProviderFailure,
+  type AiProvider,
+} from "./aiProvider";
 
 const SYSTEM_PROMPT = `You are a supportive preventive-health assistant helping a patient prepare for an upcoming doctor visit.
 
@@ -117,6 +95,7 @@ export type CopilotOutcome =
       brief: CopilotBrief;
       raw: string;
       model: string;
+      provider: AiProvider;
       processingTimeMs: number;
     }
   | { ok: false; code: CopilotErrorCode; message: string };
@@ -151,7 +130,6 @@ export const generate = action({
   handler: async (_ctx, args): Promise<CopilotOutcome> => {
     const supabaseUrl = process.env.SUPABASE_URL?.replace(/\/+$/, "");
     const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
-    const geminiKey = process.env.GEMINI_API_KEY;
 
     const fail = (code: CopilotErrorCode, message: string): CopilotOutcome => ({
       ok: false,
@@ -159,10 +137,10 @@ export const generate = action({
       message,
     });
 
-    if (!geminiKey) {
+    if (!process.env.GEMINI_API_KEY && !process.env.OPENROUTER_API_KEY) {
       return fail(
         "not_configured",
-        "GEMINI_API_KEY is not set. Add it in the Keys tab (Convex env).",
+        "No AI provider is configured. Add GEMINI_API_KEY or OPENROUTER_API_KEY in the Keys tab (Convex env).",
       );
     }
     if (!supabaseUrl || !supabaseAnonKey) {
@@ -195,8 +173,7 @@ export const generate = action({
       );
     }
 
-    // 3. Call Gemini with the deterministic statistics.
-    const model = process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+    // 3. Call the AI provider layer (Gemini → OpenRouter fallback).
     const userMessage = [
       "Here is the patient's computed health history. Please write the consultation brief.",
       "",
@@ -230,73 +207,22 @@ export const generate = action({
     ].join("\n");
 
     const startedAt = Date.now();
-    let rawContent = "";
-    try {
-      const res = await fetchWithGeminiRetry(
-        `${GEMINI_ENDPOINT}/models/${model}:generateContent?key=${encodeURIComponent(geminiKey)}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
-            contents: [{ role: "user", parts: [{ text: userMessage }] }],
-            generationConfig: {
-              temperature: 0.4,
-              maxOutputTokens: 4096,
-              responseMimeType: "application/json",
-            },
-          }),
-          signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
-        },
-      );
+    const result = await generateWithProviderFallback({
+      systemPrompt: SYSTEM_PROMPT,
+      userMessage,
+      temperature: 0.4,
+      maxOutputTokens: 4096,
+      jsonMode: true,
+    });
 
-      if (res.status === 429) {
-        return fail("rate_limited", QUOTA_EXHAUSTED_MESSAGE);
-      }
-      if (res.status === 404) {
-        return fail(
-          "model_error",
-          `The Gemini model "${model}" was not found (HTTP 404). Set GEMINI_MODEL in the Keys tab to a model your key can use.`,
-        );
-      }
-      if (res.status === 400 || res.status === 401 || res.status === 403) {
-        const errText = await res.text().catch(() => "");
-        if (/not found|not supported|does not exist|not available|invalid model/i.test(errText)) {
-          return fail(
-            "model_error",
-            `The Gemini model "${model}" was rejected (HTTP ${res.status}): ${errText.slice(0, 200)}`,
-          );
-        }
-        return fail(
-          "not_configured",
-          "The Gemini API key was rejected. Please check GEMINI_API_KEY in the Keys tab.",
-        );
-      }
-      if (!res.ok) {
-        const errText = await res.text().catch(() => "");
-        return fail(
-          "server",
-          `The AI service returned an error (HTTP ${res.status})${
-            errText ? `: ${errText.slice(0, 200)}` : ""
-          }.`,
-        );
-      }
-
-      const body = (await res.json()) as {
-        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-      };
-      const parts = body.candidates?.[0]?.content?.parts ?? [];
-      rawContent = parts
-        .map((part) => (typeof part?.text === "string" ? part.text : ""))
-        .join("\n");
-    } catch (err) {
-      const name = err instanceof Error ? err.name : "";
-      if (name === "TimeoutError" || name === "AbortError" || /timeout/i.test(String(err))) {
-        return fail("timeout", "The AI took too long to respond. Please try again.");
-      }
-      return fail("network", "Could not reach the AI service. Check your connection.");
+    if (!result.ok) {
+      const mapped = mapProviderFailure(result);
+      return fail(mapped.code, mapped.message);
     }
 
+    const rawContent = result.text;
+    const model = result.model;
+    const provider: AiProvider = result.provider;
     const processingTimeMs = Date.now() - startedAt;
 
     // 4. Parse + validate the JSON briefing.
@@ -317,6 +243,7 @@ export const generate = action({
       brief,
       raw: rawContent,
       model,
+      provider,
       processingTimeMs,
     };
   },

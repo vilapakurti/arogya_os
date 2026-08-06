@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as aiProvider from "../aiProvider.js";
 import type * as auth from "../auth.js";
 import type * as auth_emailOtp from "../auth/emailOtp.js";
 import type * as baselines from "../baselines.js";
@@ -24,6 +25,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  aiProvider: typeof aiProvider;
   auth: typeof auth;
   "auth/emailOtp": typeof auth_emailOtp;
   baselines: typeof baselines;

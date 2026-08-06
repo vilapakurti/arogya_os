@@ -23,8 +23,10 @@ import { getSupabase } from "@/lib/supabase";
  * visit brief inputs (latest vs previous comparison, improving/worsening
  * metrics, milestones, abnormal findings, top-5 lists). `generateCopilotBrief`
  * sends those computed statistics to the secure Convex action
- * `copilot:generate` (src/convex/copilot.ts), which asks Gemini for the
- * plain-language consultation narrative.
+ * `copilot:generate` (src/convex/copilot.ts), which asks the AI layer for the
+ * plain-language consultation narrative. The action transparently falls back
+ * between providers (Gemini primary, OpenRouter secondary) — the client never
+ * knows or chooses the provider.
  *
  * "Ask Doctor Copilot" (the interactive chat panel) reuses the same data:
  * `fetchLatestOcrExcerpt` + `buildCopilotChatContext` assemble a compact
@@ -177,6 +179,8 @@ export type CopilotOutcome =
       brief: CopilotBrief;
       raw: string;
       model: string;
+      /** Which provider produced the brief: "gemini" or "openrouter". */
+      provider: string;
       processingTimeMs: number;
     }
   | { ok: false; code: CopilotErrorCode; message: string };
@@ -217,6 +221,8 @@ export type CopilotChatOutcome =
       ok: true;
       reply: string;
       model: string;
+      /** Which provider produced the reply: "gemini" or "openrouter". */
+      provider: string;
       processingTimeMs: number;
     }
   | { ok: false; code: CopilotErrorCode; message: string };
@@ -749,10 +755,10 @@ function getConvexClient(): ConvexHttpClient {
 }
 
 /**
- * Asks Gemini (via the secure `copilot:generate` action) for the consultation
- * narrative. The action verifies the caller's Supabase session server-side and
- * returns a validated brief — or a structured { ok: false, code } outcome.
- * Never throws for AI failures.
+ * Asks the AI layer (via the secure `copilot:generate` action) for the
+ * consultation narrative. The action verifies the caller's Supabase session
+ * server-side and returns a validated brief — or a structured
+ * { ok: false, code } outcome. Never throws for AI failures.
  */
 export async function generateCopilotBrief(
   accessToken: string,
@@ -774,10 +780,10 @@ export async function generateCopilotBrief(
 }
 
 /**
- * Asks Gemini (via the secure `copilotChat:chat` action) to answer a question
- * grounded in the user's own health snapshot + conversation history. The
- * action verifies the caller's Supabase session server-side. Never throws for
- * AI failures — returns a structured { ok: false, code } outcome instead.
+ * Asks the AI layer (via the secure `copilotChat:chat` action) to answer a
+ * question grounded in the user's own health snapshot + conversation history.
+ * The action verifies the caller's Supabase session server-side. Never throws
+ * for AI failures — returns a structured { ok: false, code } outcome instead.
  */
 export async function generateCopilotChat(
   accessToken: string,
