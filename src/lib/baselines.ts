@@ -364,6 +364,72 @@ export function computeBaseline(
 ): BaselineStats {
   const values = validValues(history);
   const mean = meanOf(values);
-  const variance 
+  const variance = varianceOf(values);
+  const stdDev = variance === null ? null : Math.sqrt(variance);
+  const latestValue = values.length > 0 ? values[values.length - 1] : null;
+  const trend = calculateTrend(history);
 
-[FILE_TOO_LARGE]: The combined read_files output exceeded the 100,000 character hard limit. This file was truncated after 12,493 characters. Read it separately or use code_search for the relevant section.
+  const latestZScore = zScoreOf(latestValue, mean, stdDev);
+  const personalClass = classifyPersonalClass(latestZScore);
+  const sdLevel = sdLevelOf(latestZScore);
+
+  const base: Omit<BaselineStats, "insight"> = {
+    metricName,
+    unit,
+    rollingMean: mean,
+    median: medianOf(values),
+    minimum: values.length > 0 ? Math.min(...values) : null,
+    maximum: values.length > 0 ? Math.max(...values) : null,
+    stdDev,
+    variance,
+    ema: emaOf(values),
+    latestValue,
+    latestDifference:
+      latestValue !== null && mean !== null ? latestValue - mean : null,
+    percentageDifference:
+      latestValue !== null && mean !== null && mean !== 0
+        ? ((latestValue - mean) / Math.abs(mean)) * 100
+        : null,
+    latestZScore,
+    sampleCount: values.length,
+    lastUpdatedDate: lastValidDate(history),
+    personalClass,
+    riskTone: riskToneOf(personalClass, sdLevel, trend.direction, metricName),
+    sdLevel,
+    direction: trend.direction,
+    percentageChange: trend.percentageChange,
+  };
+
+  return { ...base, insight: generateInsight(base, values) };
+}
+
+/** Date of the newest valid reading (report date, else measurement date). */
+function lastValidDate(history: MetricHistoryPoint[]): string | null {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const point = history[i];
+    if (!Number.isFinite(point.metricValue)) continue;
+    return point.reportDate ?? point.measurementDate ?? null;
+  }
+  return null;
+}
+
+/** Maps the five-way class to the DB `personal_status` check constraint. */
+export function personalStatusForDb(
+  personalClass: PersonalClass,
+): "normal" | "low" | "elevated" | "critical" {
+  switch (personalClass) {
+    case "below":
+    case "far_below":
+      return "low";
+    case "above":
+      return "elevated";
+    case "far_above":
+      return "critical";
+    case "within":
+    default:
+      return "normal";
+  }
+}
+
+/** Re-exports the shared trend result type for convenience. */
+export type { TrendDirection };
