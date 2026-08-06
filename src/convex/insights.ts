@@ -16,6 +16,11 @@
  *  - Only ocr_text + health_metrics are sent to Gemini. The original PDF/image
  *    is never transmitted.
  *
+ * Resilience: Gemini's free tier throttles with HTTP 429 (and capacity blips
+ * with 503). `fetchWithGeminiRetry` retries those responses with the delay
+ * Google itself suggests (capped), so transient limits self-heal; a genuinely
+ * exhausted DAILY quota still returns `rate_limited` with an honest message.
+ *
  * Environment variables (set in the Keys tab / Convex env):
  *   GEMINI_API_KEY       — Google AI Studio API key (required)
  *   SUPABASE_URL         — e.g. https://<project>.supabase.co (required)
@@ -30,6 +35,35 @@ const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash";
 const GEMINI_TIMEOUT_MS = 75_000;
 const MAX_OCR_CHARS = 5_000;
+const MAX_GEMINI_RETRIES = 2;
+const MAX_RETRY_DELAY_MS = 15_000;
+
+/**
+ * Fetches Gemini, retrying 429 (quota/rate) and 503 (transient capacity).
+ * Uses Google's own "Please retry in Xs" hint when present, capped at
+ * MAX_RETRY_DELAY_MS so the action can never stall too long.
+ */
+async function fetchWithGeminiRetry(url: string, init: RequestInit): Promise<Response> {
+  let lastRes: Response | null = null;
+  for (let attempt = 0; attempt <= MAX_GEMINI_RETRIES; attempt += 1) {
+    const res = await fetch(url, init);
+    if (res.status !== 429 && res.status !== 503) return res;
+    lastRes = res;
+    if (attempt < MAX_GEMINI_RETRIES) {
+      const body = await res.clone().text().catch(() => "");
+      const match = body.match(/retry in ([0-9.]+)s/i);
+      const serverDelay = match ? Math.round(parseFloat(match[1]) * 1000) : 0;
+      const delay = serverDelay > 0 ? serverDelay : 3_000 * (attempt + 1);
+      await new Promise((resolve) => setTimeout(resolve, Math.min(delay, MAX_RETRY_DELAY_MS)));
+    }
+  }
+  return lastRes as Response;
+}
+
+/** Human explanation for free-tier quota exhaustion (the common 429 cause). */
+const QUOTA_EXHAUSTED_MESSAGE =
+  "The AI service's free-tier request quota is used up for today (Gemini free keys allow ~20 requests/day). " +
+  "It resets daily — try again later, or add a Gemini API key with billing enabled in the Keys tab.";
 
 const SYSTEM_PROMPT = `You are an experienced physician helping patients understand their medical reports.
 
@@ -78,14 +112,6 @@ export const generate = action({
       code: AiErrorCode,
       message: string,
     ): AiActionResult => ({ ok: false, code, message });
-
-    // [AI-DEBUG] temporary logging — remove after debugging
-    console.log("[AI-DEBUG] insights.generate start", {
-      reportId: args.reportId,
-      hasGeminiKey: !!geminiKey,
-      hasSupabaseUrl: !!supabaseUrl,
-      hasSupabaseAnonKey: !!supabaseAnonKey,
-    });
 
     if (!geminiKey) {
       return fail(
@@ -183,13 +209,7 @@ export const generate = action({
     let rawContent = "";
     let finishReason = "";
     try {
-      // [AI-DEBUG] temporary logging — remove after debugging
-      console.log("[AI-DEBUG] insights.generate calling Gemini", {
-        model,
-        ocrChars: ocrText.length,
-        metricCount: metrics.length,
-      });
-      const res = await fetch(
+      const res = await fetchWithGeminiRetry(
         `${GEMINI_ENDPOINT}/models/${model}:generateContent?key=${encodeURIComponent(geminiKey)}`,
         {
           method: "POST",
@@ -207,24 +227,8 @@ export const generate = action({
         },
       );
 
-      // [AI-DEBUG] temporary logging — remove after debugging
-      console.log("[AI-DEBUG] insights.generate HTTP status", {
-        status: res.status,
-        statusText: res.statusText,
-      });
-      if (!res.ok) {
-        const debugBody = await res.clone().text().catch(() => "");
-        console.log("[AI-DEBUG] insights.generate Gemini error body", {
-          status: res.status,
-          body: debugBody.slice(0, 3000),
-        });
-      }
-
       if (res.status === 429) {
-        return fail(
-          "rate_limited",
-          "The AI service is rate-limited right now. Please try again in a moment.",
-        );
+        return fail("rate_limited", QUOTA_EXHAUSTED_MESSAGE);
       }
       if (res.status === 404) {
         return fail(
@@ -283,13 +287,6 @@ export const generate = action({
         .map((part) => (typeof part?.text === "string" ? part.text : ""))
         .join("\n");
       finishReason = candidates[0]?.finishReason ?? "";
-      // [AI-DEBUG] temporary logging — remove after debugging
-      console.log("[AI-DEBUG] insights.generate Gemini response", {
-        finishReason,
-        totalChars: rawContent.length,
-        head500: rawContent.slice(0, 500),
-        tail500: rawContent.slice(-500),
-      });
     } catch (err) {
       const name = err instanceof Error ? err.name : "";
       if (name === "TimeoutError" || name === "AbortError" || /timeout/i.test(String(err))) {
@@ -304,14 +301,6 @@ export const generate = action({
     //    (the JSON part is usually last), then fall back to the joined text.
     const parsed = extractJsonFromParts(rawContent.split("\n"));
     if (!parsed) {
-      // [AI-DEBUG] temporary logging — remove after debugging
-      console.log("[AI-DEBUG] insights.generate parse FAILED", {
-        finishReason,
-        truncated: finishReason === "MAX_TOKENS",
-        totalChars: rawContent.length,
-        head500: rawContent.slice(0, 500),
-        tail500: rawContent.slice(-500),
-      });
       const snippet = rawContent.trim().slice(0, 300);
       return fail(
         "invalid_json",
@@ -321,14 +310,6 @@ export const generate = action({
       );
     }
     const insight = normalizeInsight(parsed);
-
-    // [AI-DEBUG] temporary logging — remove after debugging
-    console.log("[AI-DEBUG] insights.generate parse OK", {
-      finishReason,
-      model,
-      totalChars: rawContent.length,
-      processingTimeMs,
-    });
 
     return {
       ok: true,

@@ -6,7 +6,9 @@
  * Secure Google Gemini action for the interactive chat panel on the Doctor
  * Copilot page. It answers a patient's questions using their OWN health data:
  * uploaded reports, extracted OCR text, parsed health metrics, previous AI
- * analyses, personal baselines, and the latest-report comparison.
+ * analyses, personal baselines, and the latest-report comparison. This same
+ * action powers the Arogya Voice assistant, which sends the identical health
+ * snapshot from its own voice/typed interface.
  *
  * Security model (mirrors insights.ts / baselines.ts / copilot.ts):
  *  - The caller's Supabase access token is verified server-side against the
@@ -16,6 +18,11 @@
  *    baselines), so it can only ever contain that user's data.
  *  - Conversation history is session-scoped and never persisted anywhere.
  *  - The Gemini API key lives only in process.env on the Convex server.
+ *
+ * Resilience: Gemini's free tier throttles with HTTP 429 (and capacity blips
+ * with 503). `fetchWithGeminiRetry` retries those responses with the delay
+ * Google itself suggests (capped); a genuinely exhausted DAILY quota still
+ * returns `rate_limited` with an honest message.
  *
  * Environment variables (Keys tab / Convex env):
  *   GEMINI_API_KEY       — Google AI Studio API key (required)
@@ -32,6 +39,31 @@ const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash";
 const GEMINI_TIMEOUT_MS = 75_000;
 const MAX_HISTORY_TURNS = 10;
 const MAX_OCR_CHARS = 3_000;
+const MAX_GEMINI_RETRIES = 2;
+const MAX_RETRY_DELAY_MS = 15_000;
+
+/** Retries 429/503 Gemini responses, honoring Google's "retry in Xs" hint. */
+async function fetchWithGeminiRetry(url: string, init: RequestInit): Promise<Response> {
+  let lastRes: Response | null = null;
+  for (let attempt = 0; attempt <= MAX_GEMINI_RETRIES; attempt += 1) {
+    const res = await fetch(url, init);
+    if (res.status !== 429 && res.status !== 503) return res;
+    lastRes = res;
+    if (attempt < MAX_GEMINI_RETRIES) {
+      const body = await res.clone().text().catch(() => "");
+      const match = body.match(/retry in ([0-9.]+)s/i);
+      const serverDelay = match ? Math.round(parseFloat(match[1]) * 1000) : 0;
+      const delay = serverDelay > 0 ? serverDelay : 3_000 * (attempt + 1);
+      await new Promise((resolve) => setTimeout(resolve, Math.min(delay, MAX_RETRY_DELAY_MS)));
+    }
+  }
+  return lastRes as Response;
+}
+
+/** Human explanation for free-tier quota exhaustion (the common 429 cause). */
+const QUOTA_EXHAUSTED_MESSAGE =
+  "The AI service's free-tier request quota is used up for today (Gemini free keys allow ~20 requests/day). " +
+  "It resets daily — try again later, or add a Gemini API key with billing enabled in the Keys tab.";
 
 const CHAT_SYSTEM_PROMPT = `You are "Arogya Copilot", a supportive preventive-health assistant inside ArogyaOS. You help a patient understand their own medical history and prepare for a doctor visit.
 
@@ -174,7 +206,7 @@ export const chat = action({
     const startedAt = Date.now();
     let rawContent = "";
     try {
-      const res = await fetch(
+      const res = await fetchWithGeminiRetry(
         `${GEMINI_ENDPOINT}/models/${model}:generateContent?key=${encodeURIComponent(geminiKey)}`,
         {
           method: "POST",
@@ -192,10 +224,7 @@ export const chat = action({
       );
 
       if (res.status === 429) {
-        return fail(
-          "rate_limited",
-          "The AI service is rate-limited right now. Please try again in a moment.",
-        );
+        return fail("rate_limited", QUOTA_EXHAUSTED_MESSAGE);
       }
       if (res.status === 404) {
         return fail(

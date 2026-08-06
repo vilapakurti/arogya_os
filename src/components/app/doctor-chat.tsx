@@ -44,7 +44,7 @@ function friendlyError(code: string, message: string): string {
     case "unauthorized":
       return "Your session could not be verified. Please sign in again.";
     case "rate_limited":
-      return "The AI service is rate-limited right now — wait a moment and try again.";
+      return "The AI service's free-tier request quota is used up for today. It resets daily — try again later, or add a Gemini API key with billing enabled in the Keys tab.";
     case "timeout":
       return "The AI took too long to answer. Please try again.";
     case "empty_input":

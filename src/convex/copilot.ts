@@ -21,6 +21,11 @@
  *    raw report files or OCR text.
  *  - The Gemini API key lives only in process.env on the Convex server.
  *
+ * Resilience: Gemini's free tier throttles with HTTP 429 (and capacity blips
+ * with 503). `fetchWithGeminiRetry` retries those responses with the delay
+ * Google itself suggests (capped); a genuinely exhausted DAILY quota still
+ * returns `rate_limited` with an honest message.
+ *
  * Environment variables (Keys tab / Convex env):
  *   GEMINI_API_KEY       — Google AI Studio API key (required)
  *   SUPABASE_URL         — e.g. https://<project>.supabase.co (required)
@@ -34,6 +39,31 @@ import { v } from "convex/values";
 const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash";
 const GEMINI_TIMEOUT_MS = 75_000;
+const MAX_GEMINI_RETRIES = 2;
+const MAX_RETRY_DELAY_MS = 15_000;
+
+/** Retries 429/503 Gemini responses, honoring Google's "retry in Xs" hint. */
+async function fetchWithGeminiRetry(url: string, init: RequestInit): Promise<Response> {
+  let lastRes: Response | null = null;
+  for (let attempt = 0; attempt <= MAX_GEMINI_RETRIES; attempt += 1) {
+    const res = await fetch(url, init);
+    if (res.status !== 429 && res.status !== 503) return res;
+    lastRes = res;
+    if (attempt < MAX_GEMINI_RETRIES) {
+      const body = await res.clone().text().catch(() => "");
+      const match = body.match(/retry in ([0-9.]+)s/i);
+      const serverDelay = match ? Math.round(parseFloat(match[1]) * 1000) : 0;
+      const delay = serverDelay > 0 ? serverDelay : 3_000 * (attempt + 1);
+      await new Promise((resolve) => setTimeout(resolve, Math.min(delay, MAX_RETRY_DELAY_MS)));
+    }
+  }
+  return lastRes as Response;
+}
+
+/** Human explanation for free-tier quota exhaustion (the common 429 cause). */
+const QUOTA_EXHAUSTED_MESSAGE =
+  "The AI service's free-tier request quota is used up for today (Gemini free keys allow ~20 requests/day). " +
+  "It resets daily — try again later, or add a Gemini API key with billing enabled in the Keys tab.";
 
 const SYSTEM_PROMPT = `You are a supportive preventive-health assistant helping a patient prepare for an upcoming doctor visit.
 
@@ -202,7 +232,7 @@ export const generate = action({
     const startedAt = Date.now();
     let rawContent = "";
     try {
-      const res = await fetch(
+      const res = await fetchWithGeminiRetry(
         `${GEMINI_ENDPOINT}/models/${model}:generateContent?key=${encodeURIComponent(geminiKey)}`,
         {
           method: "POST",
@@ -212,7 +242,7 @@ export const generate = action({
             contents: [{ role: "user", parts: [{ text: userMessage }] }],
             generationConfig: {
               temperature: 0.4,
-              maxOutputTokens: 2048,
+              maxOutputTokens: 4096,
               responseMimeType: "application/json",
             },
           }),
@@ -221,10 +251,7 @@ export const generate = action({
       );
 
       if (res.status === 429) {
-        return fail(
-          "rate_limited",
-          "The AI service is rate-limited right now. Please try again in a moment.",
-        );
+        return fail("rate_limited", QUOTA_EXHAUSTED_MESSAGE);
       }
       if (res.status === 404) {
         return fail(

@@ -1,3 +1,4 @@
+import { FloatingVoiceAssistant } from "@/components/app/floating-voice-assistant";
 import { ArogyaMark } from "@/components/brand/arogya-mark";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
 import { Button } from "@/components/ui/button";
@@ -138,6 +139,9 @@ export function AppShell() {
       <main className="mx-auto max-w-6xl px-4 py-10 sm:px-6">
         <Outlet />
       </main>
+
+      {/* AI Voice Health Assistant — available on every app page. */}
+      <FloatingVoiceAssistant />
     </div>
   );
 }
