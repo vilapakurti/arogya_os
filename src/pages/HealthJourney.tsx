@@ -1,12 +1,1 @@
-import HealthTimeline from "./HealthTimeline";
-
-/**
- * Health Journey — the living timeline of a user's health.
- *
- * Single feature entry point: renders the full Health Timeline & Trends
- * experience (report timeline, metric tracking, trend charts, comparisons)
- * under the "Health Journey" name.
- */
-export default function HealthJourney() {
-  return <HealthTimeline />;
-}
+[FILE_TOO_LARGE]: The combined read_files output exceeded the 100,000 character hard limit. This file was truncated after 0 characters. Read it separately or use code_search for the relevant section.
