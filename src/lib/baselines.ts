@@ -308,6 +308,128 @@ function isBecomingMoreStable(values: number[]): boolean {
 
 /**
  * Generates ONE deterministic insight per metric when a rule applies,
+ * mirroring the examples in the spec ("Your Hemoglobin has remained stable…",
+ * "Blood Sugar is 14% above your personal average", etc.). Never uses AI.
+ *
+ * Priority order:
+ *  1. Continuous improvement over the last 4 reports.
+ *  2. Meaningful deviation (>10%) from the personal average.
+ *  3. Stability over the whole history.
+ *  4. Becoming more stable (tighter recent variance).
+ */
+function generateInsight(
+  stats: Omit<BaselineStats, "insight">,
+  values: number[],
+): string | null {
+  const label = METRIC_LABELS[stats.metricName] ?? stats.metricName;
 
+  if (values.length >= IMPROVEMENT_WINDOW && isContinuousImprovement(values, stats.metricName)) {
+    return `${label} has continuously improved over the last ${IMPROVEMENT_WINDOW} reports.`;
+  }
 
-[FILE_TOO_LARGE]: The combined read_files output exceeded the 100,000 character hard limit. This file was truncated after 10,391 characters. Read it separately or use code_search for the relevant section.
+  const pct = stats.percentageDifference;
+  if (pct !== null && Math.abs(pct) >= 10) {
+    const direction = pct > 0 ? "above" : "below";
+    return `${label} is ${Math.abs(Math.round(pct))}% ${direction} your personal average.`;
+  }
+
+  if (stats.sampleCount >= 3 && stats.direction === "stable") {
+    return `${label} has remained stable over the last ${stats.sampleCount} reports.`;
+  }
+
+  if (isBecomingMoreStable(values)) {
+    return `${label} is becoming more stable.`;
+  }
+
+  return null;
+}
+
+/* ------------------------------------------------------------------ */
+/* Main computation                                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Computes the full APBE statistics for one metric.
+ *
+ * @param history chronological readings (oldest → newest) for one metric.
+ * @param metricName canonical metric name (for labels/direction rules).
+ * @param unit metric unit (for display).
+ * @returns a `BaselineStats` — never throws; empty history yields null stats
+ *          with a "within" classification and a green risk tone.
+ */
+export function computeBaseline(
+  history: MetricHistoryPoint[],
+  metricName: string,
+  unit: string | null,
+): BaselineStats {
+  const values = validValues(history);
+  const mean = meanOf(values);
+  const variance = varianceOf(values);
+  const stdDev = variance === null ? null : Math.sqrt(variance);
+  const latestValue = values.length > 0 ? values[values.length - 1] : null;
+  const trend = calculateTrend(history);
+
+  const latestZScore = zScoreOf(latestValue, mean, stdDev);
+  const personalClass = classifyPersonalClass(latestZScore);
+  const sdLevel = sdLevelOf(latestZScore);
+
+  const base: Omit<BaselineStats, "insight"> = {
+    metricName,
+    unit,
+    rollingMean: mean,
+    median: medianOf(values),
+    minimum: values.length > 0 ? Math.min(...values) : null,
+    maximum: values.length > 0 ? Math.max(...values) : null,
+    stdDev,
+    variance,
+    ema: emaOf(values),
+    latestValue,
+    latestDifference:
+      latestValue !== null && mean !== null ? latestValue - mean : null,
+    percentageDifference:
+      latestValue !== null && mean !== null && mean !== 0
+        ? ((latestValue - mean) / Math.abs(mean)) * 100
+        : null,
+    latestZScore,
+    sampleCount: values.length,
+    lastUpdatedDate: lastValidDate(history),
+    personalClass,
+    riskTone: riskToneOf(personalClass, sdLevel, trend.direction, metricName),
+    sdLevel,
+    direction: trend.direction,
+    percentageChange: trend.percentageChange,
+  };
+
+  return { ...base, insight: generateInsight(base, values) };
+}
+
+/** Date of the newest valid reading (report date, else measurement date). */
+function lastValidDate(history: MetricHistoryPoint[]): string | null {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const point = history[i];
+    if (!Number.isFinite(point.metricValue)) continue;
+    return point.reportDate ?? point.measurementDate ?? null;
+  }
+  return null;
+}
+
+/** Maps the five-way class to the DB `personal_status` check constraint. */
+export function personalStatusForDb(
+  personalClass: PersonalClass,
+): "normal" | "low" | "elevated" | "critical" {
+  switch (personalClass) {
+    case "below":
+    case "far_below":
+      return "low";
+    case "above":
+      return "elevated";
+    case "far_above":
+      return "critical";
+    case "within":
+    default:
+      return "normal";
+  }
+}
+
+/** Re-exports the shared trend result type for convenience. */
+export type { TrendDirection };

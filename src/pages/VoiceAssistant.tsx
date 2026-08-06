@@ -1,1 +1,12 @@
-[FILE_TOO_LARGE]: The combined read_files output exceeded the 100,000 character hard limit. This file was truncated after 0 characters. Read it separately or use code_search for the relevant section.
+import { ModulePlaceholder } from "@/components/app/module-placeholder";
+import { Mic } from "lucide-react";
+
+export default function VoiceAssistant() {
+  return (
+    <ModulePlaceholder
+      icon={Mic}
+      title="Voice Assistant"
+      description="Speak in your own language — Hindi, Tamil, Marathi and more — and get health answers grounded in your own records."
+    />
+  );
+}
