@@ -29,7 +29,7 @@ import { v } from "convex/values";
 const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash";
 const GEMINI_TIMEOUT_MS = 75_000;
-const MAX_OCR_CHARS = 12_000;
+const MAX_OCR_CHARS = 5_000;
 
 const SYSTEM_PROMPT = `You are an experienced physician helping patients understand their medical reports.
 
@@ -78,6 +78,14 @@ export const generate = action({
       code: AiErrorCode,
       message: string,
     ): AiActionResult => ({ ok: false, code, message });
+
+    // [AI-DEBUG] temporary logging — remove after debugging
+    console.log("[AI-DEBUG] insights.generate start", {
+      reportId: args.reportId,
+      hasGeminiKey: !!geminiKey,
+      hasSupabaseUrl: !!supabaseUrl,
+      hasSupabaseAnonKey: !!supabaseAnonKey,
+    });
 
     if (!geminiKey) {
       return fail(
@@ -175,6 +183,12 @@ export const generate = action({
     let rawContent = "";
     let finishReason = "";
     try {
+      // [AI-DEBUG] temporary logging — remove after debugging
+      console.log("[AI-DEBUG] insights.generate calling Gemini", {
+        model,
+        ocrChars: ocrText.length,
+        metricCount: metrics.length,
+      });
       const res = await fetch(
         `${GEMINI_ENDPOINT}/models/${model}:generateContent?key=${encodeURIComponent(geminiKey)}`,
         {
@@ -185,13 +199,26 @@ export const generate = action({
             contents: [{ role: "user", parts: [{ text: userMessage }] }],
             generationConfig: {
               temperature: 0.3,
-              maxOutputTokens: 2048,
+              maxOutputTokens: 4096,
               responseMimeType: "application/json",
             },
           }),
           signal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
         },
       );
+
+      // [AI-DEBUG] temporary logging — remove after debugging
+      console.log("[AI-DEBUG] insights.generate HTTP status", {
+        status: res.status,
+        statusText: res.statusText,
+      });
+      if (!res.ok) {
+        const debugBody = await res.clone().text().catch(() => "");
+        console.log("[AI-DEBUG] insights.generate Gemini error body", {
+          status: res.status,
+          body: debugBody.slice(0, 3000),
+        });
+      }
 
       if (res.status === 429) {
         return fail(
@@ -256,6 +283,13 @@ export const generate = action({
         .map((part) => (typeof part?.text === "string" ? part.text : ""))
         .join("\n");
       finishReason = candidates[0]?.finishReason ?? "";
+      // [AI-DEBUG] temporary logging — remove after debugging
+      console.log("[AI-DEBUG] insights.generate Gemini response", {
+        finishReason,
+        totalChars: rawContent.length,
+        head500: rawContent.slice(0, 500),
+        tail500: rawContent.slice(-500),
+      });
     } catch (err) {
       const name = err instanceof Error ? err.name : "";
       if (name === "TimeoutError" || name === "AbortError" || /timeout/i.test(String(err))) {
@@ -270,6 +304,14 @@ export const generate = action({
     //    (the JSON part is usually last), then fall back to the joined text.
     const parsed = extractJsonFromParts(rawContent.split("\n"));
     if (!parsed) {
+      // [AI-DEBUG] temporary logging — remove after debugging
+      console.log("[AI-DEBUG] insights.generate parse FAILED", {
+        finishReason,
+        truncated: finishReason === "MAX_TOKENS",
+        totalChars: rawContent.length,
+        head500: rawContent.slice(0, 500),
+        tail500: rawContent.slice(-500),
+      });
       const snippet = rawContent.trim().slice(0, 300);
       return fail(
         "invalid_json",
@@ -279,6 +321,14 @@ export const generate = action({
       );
     }
     const insight = normalizeInsight(parsed);
+
+    // [AI-DEBUG] temporary logging — remove after debugging
+    console.log("[AI-DEBUG] insights.generate parse OK", {
+      finishReason,
+      model,
+      totalChars: rawContent.length,
+      processingTimeMs,
+    });
 
     return {
       ok: true,
