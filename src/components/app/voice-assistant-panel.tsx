@@ -27,7 +27,7 @@ import {
   VolumeX,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 
 /**
@@ -39,6 +39,12 @@ import { Link } from "react-router";
  * speech via browser speechSynthesis. Conversation history lives in this
  * component + sessionStorage for the current browser session — never stored
  * on a server.
+ *
+ * The voice footer offers a language quick-picker for the major Indian
+ * languages (Hindi, Telugu, Tamil, Malayalam, Kannada) in addition to the
+ * fine-grained voice dropdown. Picking a language resolves the best available
+ * voice and falls back to a language hint so browsers with network TTS can
+ * still speak it.
  */
 
 /* ------------------------------- atoms ------------------------------- */
@@ -87,6 +93,23 @@ function formatTime(timestamp: number): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+/* ---------------------- Indian language presets --------------------- */
+
+const INDIAN_LANGUAGES: { code: string; label: string; native: string }[] = [
+  { code: "hi-IN", label: "Hindi", native: "हिन्दी" },
+  { code: "te-IN", label: "Telugu", native: "తెలుగు" },
+  { code: "ta-IN", label: "Tamil", native: "தமிழ்" },
+  { code: "ml-IN", label: "Malayalam", native: "മലയാളം" },
+  { code: "kn-IN", label: "Kannada", native: "ಕನ್ನಡ" },
+];
+
+/** Primary BCP-47 subtags of the presets (e.g. "hi", "te", "ta"…). */
+const INDIAN_PRIMARIES = new Set(INDIAN_LANGUAGES.map((l) => l.code.split("-")[0].toLowerCase()));
+
+function voicePrimary(voice: SpeechSynthesisVoice | null): string {
+  return (voice?.lang ?? "").toLowerCase().split("-")[0];
 }
 
 /* ------------------------------ component ---------------------------- */
@@ -280,6 +303,28 @@ export function VoiceAssistantPanel({
   }, [recognition, tts, onClose]);
 
   const speaking = tts.speaking && !tts.paused;
+
+  /* Indian voices first in the fine-grained dropdown, so they're easy to find. */
+  const sortedVoices = useMemo(() => {
+    return [...tts.voices].sort((a, b) => {
+      const aIndian = INDIAN_PRIMARIES.has(voicePrimary(a)) ? 0 : 1;
+      const bIndian = INDIAN_PRIMARIES.has(voicePrimary(b)) ? 0 : 1;
+      return aIndian - bIndian || a.name.localeCompare(b.name);
+    });
+  }, [tts.voices]);
+
+  /** True when the given language preset is the active TTS language. */
+  const isLangActive = (code: string) => {
+    if (!code) {
+      return (
+        !tts.lang &&
+        (!tts.voice || !INDIAN_PRIMARIES.has(voicePrimary(tts.voice)))
+      );
+    }
+    if (tts.lang === code) return true;
+    if (!tts.voice) return false;
+    return voicePrimary(tts.voice) === code.split("-")[0].toLowerCase();
+  };
 
   /* ------------------------------ render ------------------------------ */
 
@@ -562,6 +607,51 @@ export function VoiceAssistantPanel({
         </div>
       </div>
 
+      {/* Language quick-picker — Indian languages included */}
+      {tts.supported && (
+        <div className="flex items-center gap-2 border-t border-border/40 bg-background/25 px-3 py-2">
+          <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Language
+          </span>
+          <div
+            className="flex min-w-0 flex-1 gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            role="group"
+            aria-label="Choose the language for read-aloud answers"
+          >
+            <button
+              type="button"
+              onClick={() => tts.selectLanguage("")}
+              aria-pressed={isLangActive("")}
+              className={`shrink-0 cursor-pointer rounded-full border px-2.5 py-1 text-[11px] font-medium transition-all ${
+                isLangActive("")
+                  ? "border-primary/50 bg-primary/12 text-primary"
+                  : "border-border/60 bg-background/40 text-muted-foreground hover:border-primary/30 hover:text-foreground"
+              }`}
+            >
+              Default
+            </button>
+            {INDIAN_LANGUAGES.map((language) => {
+              const active = isLangActive(language.code);
+              return (
+                <button
+                  key={language.code}
+                  type="button"
+                  onClick={() => tts.selectLanguage(language.code)}
+                  aria-pressed={active}
+                  className={`shrink-0 cursor-pointer rounded-full border px-2.5 py-1 text-[11px] font-medium transition-all ${
+                    active
+                      ? "border-primary/50 bg-primary/12 text-primary"
+                      : "border-border/60 bg-background/40 text-muted-foreground hover:border-primary/30 hover:text-foreground"
+                  }`}
+                >
+                  {language.native} {language.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Voice output controls */}
       <div className="flex items-center gap-1.5 border-t border-border/40 bg-background/25 px-3 py-2">
         <span className="mr-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -615,9 +705,9 @@ export function VoiceAssistantPanel({
               className="hidden h-7 min-w-0 flex-1 cursor-pointer rounded-lg border border-border/60 bg-background/50 px-2 text-[11px] text-foreground outline-none focus:border-primary/60 sm:block"
             >
               <option value="">Default browser voice</option>
-              {tts.voices.map((v) => (
+              {sortedVoices.map((v) => (
                 <option key={v.name} value={v.name}>
-                  {v.name}
+                  {v.name} · {v.lang}
                 </option>
               ))}
             </select>

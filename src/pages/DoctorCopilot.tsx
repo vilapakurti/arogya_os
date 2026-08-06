@@ -74,8 +74,8 @@ import { toast } from "sonner";
  *
  * Prepares the user for a doctor visit: deterministic health summary built
  * from the shared timeline/trends/APBE modules, a per-metric latest-vs-
- * previous comparison, a timeline snapshot, an optional Gemini consultation
- * brief (secure Convex action), an interactive "Ask Doctor Copilot" chat panel
+ * previous comparison, a timeline snapshot, an optional AI consultation brief
+ * (secure Convex action), an interactive "Ask Doctor Copilot" chat panel
  * (secure `copilotChat:chat` action), and a branded PDF/print export. All data
  * reads reuse existing RLS-scoped accessors — no new tables, no new queries
  * beyond the previous-AI-summaries and latest-OCR lookups.
@@ -213,13 +213,19 @@ function PageSkeleton() {
 /* Printable report (PDF + print)                                      */
 /* ------------------------------------------------------------------ */
 
-/** Inline-styled, theme-independent report used for the PDF + print export. */
+/**
+ * Inline-styled, theme-independent report used for the PDF + print export.
+ * `ref` attaches the parent's reportRef so html2canvas can capture this exact
+ * node when the user downloads the PDF.
+ */
 function PrintableBrief({
   analysis,
   brief,
+  ref,
 }: {
   analysis: CopilotAnalysis;
   brief: CopilotBrief | null;
+  ref?: React.Ref<HTMLDivElement | null>;
 }) {
   const generatedAt = new Date().toLocaleString("en-US", {
     dateStyle: "long",
@@ -229,6 +235,7 @@ function PrintableBrief({
   return (
     <div
       id="doctor-brief-print"
+      ref={ref}
       style={{
         position: "fixed",
         left: -9999,
@@ -625,7 +632,10 @@ export default function DoctorCopilot() {
   /* ---------------------------- export ---------------------------- */
 
   const downloadPdf = useCallback(async () => {
-    const node = reportRef.current;
+    // The printable node is captured via the ref; fall back to the DOM id in
+    // case the ref has not attached yet.
+    const node =
+      reportRef.current ?? document.getElementById("doctor-brief-print");
     if (!node || exporting) return;
     setExporting(true);
     try {
@@ -748,7 +758,7 @@ export default function DoctorCopilot() {
       className="mx-auto max-w-6xl"
     >
       {/* Printable report (hidden off-screen; used by PDF + print). */}
-      <PrintableBrief analysis={analysis} brief={brief} />
+      <PrintableBrief ref={reportRef} analysis={analysis} brief={brief} />
 
       {/* Print styles — only the report is visible on paper. */}
       <style>{`
