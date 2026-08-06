@@ -153,57 +153,11 @@ export async function upsertPersonalBaseline(
     personal_status: personalStatusForDb(stats.personalClass),
   };
 
-  // ================================ [TEMP-DEBUG] ================================
-  // Instrumented ONLY to trace why personal_baselines stays empty. Does NOT
-  // change business logic, payload, onConflict, or error handling. Remove after
-  // diagnosis. Logs the exact .upsert() response (data / error / status /
-  // statusText) and stores the last result on window.__APBE_DEBUG__ for easy
-  // retrieval via:  copy(JSON.stringify(window.__APBE_DEBUG__, null, 2))
-  const supabase = getSupabase();
-  const debugSession = await supabase.auth
-    .getSession()
-    .then((r) => r.data.session)
-    .catch(() => null);
-  const debugContext = {
-    table: "personal_baselines",
-    onConflict: "user_id,metric_name",
-    supabaseUrl: (import.meta.env.VITE_SUPABASE_URL as string | undefined) ?? "UNSET",
-    clientHasSession: Boolean(debugSession),
-    sessionUserId: debugSession?.user?.id ?? null,
-    writeUserId: userId,
-    metric: stats.metricName,
-    sampleCount: stats.sampleCount,
-    payload,
-  };
-  console.log("[APBE-DEBUG] pre-upsert", JSON.stringify(debugContext, null, 2));
-
-  const result = await supabase.from("personal_baselines").upsert(payload, {
-    onConflict: "user_id,metric_name",
-  });
-
-  const debugResult = {
-    data: result.data,
-    error: result.error
-      ? {
-          name: result.error.name,
-          code: result.error.code,
-          message: result.error.message,
-          details: result.error.details,
-          hint: result.error.hint,
-        }
-      : null,
-    status: result.status,
-    statusText: result.statusText,
-  };
-  console.log("[APBE-DEBUG] upsert-result", JSON.stringify(debugResult, null, 2));
-  if (typeof window !== "undefined") {
-    (window as unknown as Record<string, unknown>).__APBE_DEBUG__ = {
-      at: new Date().toISOString(),
-      context: debugContext,
-      result: debugResult,
-    };
-  }
-  // ============================ /[TEMP-DEBUG] ============================
+  const result = await getSupabase()
+    .from("personal_baselines")
+    .upsert(payload, {
+      onConflict: "user_id,metric_name",
+    });
 
   if (result.error) {
     throwIfSchemaMissing(result.error);

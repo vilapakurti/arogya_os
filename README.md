@@ -23,11 +23,25 @@ This project is set up already and running on a cloud environment, as well as a 
 
 ## Environment Variables
 
-The project is set up with project specific CONVEX_DEPLOYMENT and VITE_CONVEX_URL environment variables on the client side.
+### Client (Vite)
 
-The convex server has a separate set of environment variables that are accessible by the convex backend.
+- `VITE_CONVEX_URL` / `CONVEX_DEPLOYMENT` — Convex deployment the frontend talks to.
+- `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` — Supabase project for medical records, OCR, health metrics, personal baselines, and AI insights. The anon key must belong to the same project as the URL.
 
-Currently, these variables include auth-specific keys: JWKS, JWT_PRIVATE_KEY, and SITE_URL.
+### Backend (Convex environment)
+
+- `JWKS`, `JWT_PRIVATE_KEY`, `SITE_URL` — Convex Auth configuration.
+- `GEMINI_API_KEY` (required) / `GEMINI_MODEL` (default: `gemini-3.6-flash`) — primary AI provider.
+- `OPENROUTER_API_KEY` (recommended) / `OPENROUTER_MODEL` (default: `qwen/qwen3-235b-a22b:free`) — automatic fallback provider.
+
+### AI provider fallback
+
+All AI features (report analysis, Doctor Copilot brief, Ask Doctor Copilot chat, and the Voice Assistant) route through a single backend module (`src/convex/aiProvider.ts`) with this priority:
+
+1. **Gemini** — tried first.
+2. **OpenRouter** — used automatically when Gemini fails with HTTP 429 / `RESOURCE_EXHAUSTED` (free-tier daily quota), 5xx, timeouts, network errors, or invalid/expired keys.
+
+Both providers return the same normalized response; the frontend never knows (or needs to know) which provider answered. The provider actually used is recorded on each analysis (`ai_insights.provider`, added by migration 0006) and logged by the backend for monitoring. Retry-with-backoff is applied per provider for transient 429/503 throttles before falling back.
 
 
 # Using Authentication (Important!)
