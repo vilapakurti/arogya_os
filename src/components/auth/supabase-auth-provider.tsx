@@ -11,12 +11,38 @@ import {
   type ReactNode,
 } from "react";
 
+export interface Medication {
+  name: string;
+  dosage: string;
+  frequency: string;
+}
+
 export interface Profile {
   id: string;
   full_name: string | null;
   age: number | null;
   gender: string | null;
   preferred_language: string | null;
+  /* ---- Patient Profile fields (migration 0007) ---- */
+  date_of_birth: string | null;
+  blood_group: string | null;
+  height_cm: number | null;
+  weight_kg: number | null;
+  bmi: number | null;
+  bmi_category: string | null;
+  age_category: string | null;
+  pregnant: boolean | null;
+  trimester: string | null;
+  smoking_status: string | null;
+  alcohol_status: string | null;
+  exercise_level: string | null;
+  known_conditions: string[] | null;
+  family_history: string[] | null;
+  allergies: string | null;
+  current_medications: Medication[] | null;
+  emergency_contact_name: string | null;
+  emergency_contact_phone: string | null;
+  emergency_contact_relationship: string | null;
   created_at: string;
   updated_at: string;
 }
