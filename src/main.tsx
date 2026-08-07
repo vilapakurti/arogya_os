@@ -25,6 +25,7 @@ const HealthBaseline = lazy(() => import("./pages/HealthBaseline.tsx"));
 const DoctorCopilot = lazy(() => import("./pages/DoctorCopilot.tsx"));
 const VoiceAssistant = lazy(() => import("./pages/VoiceAssistant.tsx"));
 const Profile = lazy(() => import("./pages/Profile.tsx"));
+const PatientProfile = lazy(() => import("./pages/PatientProfile.tsx"));
 const NotFound = lazy(() => import("./pages/NotFound.tsx"));
 
 // Simple loading fallback for route transitions
@@ -68,6 +69,7 @@ function Root() {
           <Route path="/copilot" element={<Navigate to="/doctor-copilot" replace />} />
           <Route path="/voice" element={<VoiceAssistant />} />
           <Route path="/profile" element={<Profile />} />
+          <Route path="/patient-profile" element={<PatientProfile />} />
         </Route>
 
         <Route path="*" element={<NotFound />} />

@@ -16,7 +16,8 @@ const APP_LINKS = [
   { to: "/baseline", label: "Health Baseline" },
   { to: "/copilot", label: "Doctor Copilot" },
   { to: "/voice", label: "Voice Assistant" },
-  { to: "/profile", label: "Profile" },
+  { to: "/patient-profile", label: "Patient Profile" },
+  { to: "/profile", label: "Account" },
 ];
 
 function initialsOf(name?: string | null, email?: string | null) {
