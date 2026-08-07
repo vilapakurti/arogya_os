@@ -14,7 +14,6 @@ import type * as auth_emailOtp from "../auth/emailOtp.js";
 import type * as baselines from "../baselines.js";
 import type * as copilot from "../copilot.js";
 import type * as copilotChat from "../copilotChat.js";
-import type * as debugEnv from "../debugEnv.js";
 import type * as http from "../http.js";
 import type * as insights from "../insights.js";
 import type * as users from "../users.js";
@@ -32,7 +31,6 @@ declare const fullApi: ApiFromModules<{
   baselines: typeof baselines;
   copilot: typeof copilot;
   copilotChat: typeof copilotChat;
-  debugEnv: typeof debugEnv;
   http: typeof http;
   insights: typeof insights;
   users: typeof users;
