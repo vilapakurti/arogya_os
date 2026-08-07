@@ -10,6 +10,12 @@ import {
   type CopilotChatContext,
   type PreviousAiSummary,
 } from "@/lib/copilot";
+import {
+  evaluatePatient,
+  toClinicalProfile,
+  type ClinicalProfile,
+  type ProfileLike,
+} from "@/lib/clinical";
 
 /**
  * AI Voice Health Assistant — client data layer.
@@ -25,6 +31,11 @@ import {
  *    `fetchPersonalBaselines`, `fetchPreviousAiSummaries`,
  *    `fetchLatestOcrExcerpt`, `buildCopilotAnalysis` and
  *    `buildCopilotChatContext` from the Doctor Copilot stack.
+ *  - CDSS: every metric passes through the Clinical Decision Support Engine
+ *    (via `buildCopilotAnalysis` → `evaluateReport`), and the patient profile
+ *    is consumed through `evaluatePatient` so the assistant answers with
+ *    interpreted clinical context (meaning, severity, risk, recommendations),
+ *    not raw values.
  *  - AI: the compact snapshot is sent to the existing secure `copilotChat:chat`
  *    Convex action, which verifies the Supabase session server-side and calls
  *    Gemini with the project's existing configuration. No keys ever touch the
@@ -47,20 +58,39 @@ export interface VoiceSnapshot {
  * Loads everything the assistant needs in one shot, reusing the existing
  * Doctor Copilot queries (no new database reads). `reportCount === 0`
  * signals the empty state.
+ *
+ * `clinicalProfile` (optional) is the stored patient profile row. The CDSS
+ * personalizes every interpretation against it — reference ranges by
+ * age/gender/pregnancy/known conditions, plus a whole-person risk summary via
+ * `evaluatePatient` — so the assistant speaks with clinical context rather
+ * than raw values. Pass `null` (or omit) when the profile is unavailable;
+ * the engine then falls back to population defaults, keeping the feature
+ * fully backward compatible.
  */
-export async function loadVoiceSnapshot(userId: string): Promise<VoiceSnapshot> {
+export async function loadVoiceSnapshot(
+  userId: string,
+  clinicalProfile?: ProfileLike | null,
+): Promise<VoiceSnapshot> {
   const [copilotData, baselineRows, summaries] = await Promise.all([
     fetchCopilotData(userId),
     fetchPersonalBaselines(userId).catch(() => []),
     fetchPreviousAiSummaries(userId).catch(() => [] as PreviousAiSummary[]),
   ]);
+  const profile: ClinicalProfile = toClinicalProfile(clinicalProfile);
   const analysis = buildCopilotAnalysis(
     copilotData.reports,
     copilotData.metrics,
     baselineRows.length,
+    profile,
   );
   const latestOcr = await fetchLatestOcrExcerpt(userId).catch(() => null);
   const chatContext = buildCopilotChatContext(analysis, summaries, latestOcr);
+  // The Voice Assistant must also consume the CDSS patient evaluation before
+  // generating speech: append the whole-person risk summary to the snapshot.
+  const patient = evaluatePatient(profile, analysis.cdss);
+  chatContext.clinicalHighlights = [chatContext.clinicalHighlights ?? "", `Patient risk summary: ${patient.summary}`]
+    .filter(Boolean)
+    .join("\n");
   return { analysis, previousSummaries: summaries, chatContext, reportCount: analysis.reportCount };
 }
 

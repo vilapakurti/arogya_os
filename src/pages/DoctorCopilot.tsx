@@ -22,6 +22,11 @@ import {
 import { useAuth } from "@/hooks/use-auth";
 import { fetchPersonalBaselines } from "@/lib/baseline-data";
 import {
+  evaluatePatient,
+  toClinicalProfile,
+  type ClinicalProfile,
+} from "@/lib/clinical";
+import {
   buildCopilotAnalysis,
   buildCopilotChatContext,
   buildCopilotInput,
@@ -79,6 +84,12 @@ import { toast } from "sonner";
  * (secure `copilotChat:chat` action), and a branded PDF/print export. All data
  * reads reuse existing RLS-scoped accessors — no new tables, no new queries
  * beyond the previous-AI-summaries and latest-OCR lookups.
+ *
+ * Clinical interpretation is NOT computed here: every metric passes through
+ * the Clinical Decision Support Engine (`buildCopilotAnalysis` →
+ * `evaluateReport`, personalized against the patient profile), and the page
+ * simply consumes the engine's output — severity, priority, trend, clinical
+ * meaning, combined findings, risk profile and the patient-level evaluation.
  */
 
 /* ------------------------------------------------------------------ */
@@ -523,7 +534,7 @@ function ListGroup({
 /* ------------------------------------------------------------------ */
 
 export default function DoctorCopilot() {
-  const { user, session } = useAuth();
+  const { user, session, profile } = useAuth();
   const navigate = useNavigate();
   const reportRef = useRef<HTMLDivElement>(null);
 
@@ -568,10 +579,20 @@ export default function DoctorCopilot() {
     };
   }, [user, attempt]);
 
-  /* Deterministic analysis — memoized. */
+  /* Patient profile → CDSS clinical profile (personalized ranges/risk). */
+  const clinicalProfile: ClinicalProfile = useMemo(
+    () => toClinicalProfile(profile),
+    [profile],
+  );
+
+  /* Deterministic analysis — memoized. Every metric passes through the
+     Clinical Decision Support Engine, personalized against the profile. */
   const analysis = useMemo(
-    () => (data ? buildCopilotAnalysis(data.reports, data.metrics, baselineCount) : null),
-    [data, baselineCount],
+    () =>
+      data
+        ? buildCopilotAnalysis(data.reports, data.metrics, baselineCount, clinicalProfile)
+        : null,
+    [data, baselineCount, clinicalProfile],
   );
 
   /* Latest OCR excerpt for the Ask Doctor Copilot chat (one RLS-scoped read). */
@@ -590,11 +611,19 @@ export default function DoctorCopilot() {
     };
   }, [user]);
 
-  /* Ask Doctor Copilot — compact health snapshot reusing already-loaded data. */
-  const chatContext = useMemo<CopilotChatContext | null>(
-    () => (analysis ? buildCopilotChatContext(analysis, previousSummaries, latestOcr) : null),
-    [analysis, previousSummaries, latestOcr],
-  );
+  /* Ask Doctor Copilot — compact health snapshot reusing already-loaded data.
+     The chat also consumes the CDSS patient-level evaluation. */
+  const chatContext = useMemo<CopilotChatContext | null>(() => {
+    if (!analysis) return null;
+    const ctx = buildCopilotChatContext(analysis, previousSummaries, latestOcr);
+    ctx.clinicalHighlights = [
+      ctx.clinicalHighlights ?? "",
+      `Patient risk summary: ${evaluatePatient(clinicalProfile, analysis.cdss).summary}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    return ctx;
+  }, [analysis, previousSummaries, latestOcr, clinicalProfile]);
 
   /* AI consultation brief — one call per visit when enough data. */
   useEffect(() => {

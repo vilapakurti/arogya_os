@@ -9,7 +9,11 @@
  * The deterministic analysis (latest vs previous report, personal baseline,
  * improving/worsening metrics, milestones, abnormal findings) is computed on
  * the client by src/lib/copilot.ts using the shared timeline/trends/APBE
- * modules. This action only receives those already-computed, non-sensitive
+ * modules. Every metric additionally passes through the Clinical Decision
+ * Support Engine (src/lib/clinical), so the model also receives per-metric
+ * clinical meaning / severity / priority / recommendation, combined findings,
+ * a risk profile and an overall clinical summary — NOT raw metric/value pairs
+ * alone. This action only receives those already-computed, non-sensitive
  * statistics plus the previous AI summaries, and asks the LLM for the
  * consultation narrative. It never touches ai_insights and never modifies any
  * table — it is read/stateless.
@@ -45,11 +49,11 @@ import {
 
 const SYSTEM_PROMPT = `You are a supportive preventive-health assistant helping a patient prepare for an upcoming doctor visit.
 
-You are given the patient's computed health history: how many reports they have, the latest report date, metrics being tracked, improving and worsening metrics, an overall risk level (already derived deterministically), abnormal findings, notable milestones, per-metric comparisons (latest vs previous vs personal baseline vs population reference range), and brief summaries of previous AI analyses.
+You are given the patient's computed health history: how many reports they have, the latest report date, metrics being tracked, improving and worsening metrics, an overall risk level (already derived deterministically), abnormal findings, notable milestones, per-metric comparisons (latest vs previous vs personal baseline vs population reference range), brief summaries of previous AI analyses, AND a Clinical Decision Support (CDSS) block computed by a rules engine (per-metric clinical meaning, severity, priority, recommendation, trend interpretation, combined findings, risk profile, and a clinical summary).
 
 Rules:
 - Write plainly and reassuringly; never diagnose disease.
-- Always frame findings as observations and encourage confirming with a doctor.
+- Use the CDSS clinical meanings and priorities to decide what matters most, but always frame findings as observations and encourage confirming with a doctor.
 - Suggested follow-up tests are EDUCATIONAL ONLY — never prescribe.
 - Respond with ONLY a single JSON object. No markdown, no code fences, no commentary.
 
@@ -125,6 +129,40 @@ export const generate = action({
         }),
       ),
       previousSummaries: v.array(v.string()),
+      /* ---- CDSS enrichment (optional — older clients keep working) ---- */
+      clinicalSummary: v.optional(v.string()),
+      combinedFindings: v.optional(
+        v.array(
+          v.object({
+            finding: v.string(),
+            confidence: v.number(),
+            priority: v.string(),
+            explanation: v.string(),
+          }),
+        ),
+      ),
+      riskProfile: v.optional(
+        v.array(
+          v.object({
+            label: v.string(),
+            level: v.string(),
+            score: v.number(),
+          }),
+        ),
+      ),
+      metricClinical: v.optional(
+        v.array(
+          v.object({
+            metricName: v.string(),
+            clinicalMeaning: v.string(),
+            severity: v.string(),
+            priority: v.string(),
+            recommendation: v.string(),
+            trendInterpretation: v.string(),
+            doctorReview: v.boolean(),
+          }),
+        ),
+      ),
     }),
   },
   handler: async (_ctx, args): Promise<CopilotOutcome> => {
@@ -202,6 +240,18 @@ export const generate = action({
       "",
       "=== PREVIOUS AI SUMMARIES ===",
       JSON.stringify(args.input.previousSummaries, null, 1),
+      "",
+      "=== CLINICAL DECISION SUPPORT (CDSS) ===",
+      JSON.stringify(
+        {
+          clinicalSummary: args.input.clinicalSummary ?? "",
+          combinedFindings: args.input.combinedFindings ?? [],
+          riskProfile: args.input.riskProfile ?? [],
+          metricClinical: args.input.metricClinical ?? [],
+        },
+        null,
+        1,
+      ),
       "",
       "Return the JSON consultation brief exactly as instructed.",
     ].join("\n");

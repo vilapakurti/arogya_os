@@ -6,8 +6,9 @@
  * Secure AI action for the interactive chat panel on the Doctor Copilot page.
  * It answers a patient's questions using their OWN health data: uploaded
  * reports, extracted OCR text, parsed health metrics, previous AI analyses,
- * personal baselines, and the latest-report comparison. This same action
- * powers the Arogya Voice assistant, which sends the identical health
+ * personal baselines, the latest-report comparison, and a Clinical Decision
+ * Support (CDSS) highlights block computed by src/lib/clinical. This same
+ * action powers the Arogya Voice assistant, which sends the identical health
  * snapshot from its own voice/typed interface.
  *
  * The LLM call goes through the shared `aiProvider` module
@@ -47,12 +48,12 @@ const MAX_OCR_CHARS = 3_000;
 
 const CHAT_SYSTEM_PROMPT = `You are "Arogya Copilot", a supportive preventive-health assistant inside ArogyaOS. You help a patient understand their own medical history and prepare for a doctor visit.
 
-The patient provides a snapshot of their OWN health data: number of reports, latest report details, tracked metrics, improving/worsening metrics, an overall risk level (already computed deterministically), abnormal findings, milestones, per-metric comparisons (latest vs previous vs personal baseline vs population reference range), an excerpt of the latest report's extracted OCR text, and summaries of previous AI analyses.
+The patient provides a snapshot of their OWN health data: number of reports, latest report details, tracked metrics, improving/worsening metrics, an overall risk level (already computed deterministically), abnormal findings, milestones, per-metric comparisons (latest vs previous vs personal baseline vs population reference range), an excerpt of the latest report's extracted OCR text, summaries of previous AI analyses, and a Clinical Decision Support (CDSS) block with per-metric clinical meanings, combined findings, risk levels, and any emergency flags.
 
 Rules you must follow:
 - Answer ONLY from the provided health snapshot. Never invent values, tests, medications, or findings that are not in the snapshot.
 - If the snapshot lacks what they ask about, say so plainly, e.g. "I don't have data on that in your uploaded reports."
-- Never diagnose disease or prescribe treatment. Frame everything as observations and always encourage confirming with a doctor.
+- Use the CDSS clinical meanings and risk levels to frame answers, but never diagnose disease or prescribe treatment. Frame everything as observations and always encourage confirming with a doctor.
 - Be concise and reassuring: 2-6 short paragraphs or a few bullets.
 - If the question is unrelated to their health data, gently bring the conversation back to their reports.`;
 
@@ -110,6 +111,8 @@ export const chat = action({
       ),
       latestOcrExcerpt: v.optional(v.union(v.string(), v.null())),
       previousSummaries: v.array(v.string()),
+      /* ---- CDSS highlights (optional — older clients keep working) ---- */
+      clinicalHighlights: v.optional(v.string()),
     }),
   },
   handler: async (_ctx, args): Promise<CopilotChatOutcome> => {

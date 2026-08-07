@@ -2,6 +2,12 @@ import { ConvexHttpClient } from "convex/browser";
 import { api } from "@/convex/_generated/api";
 import { computeBaseline, isImprovingDirection } from "@/lib/baselines";
 import {
+  evaluateReport,
+  type ClinicalProfile,
+  type MetricInput,
+  type ReportEvaluation,
+} from "@/lib/clinical";
+import {
   fetchAllReports,
   fetchMetricsForUser,
   type TimelineMetric,
@@ -18,21 +24,24 @@ import { getSupabase } from "@/lib/supabase";
  *  - baselines.ts      → computeBaseline (personal baseline, z-score, trend)
  *  - insights.ts / ai_insights → previous AI summaries
  *  - baseline-data.ts  → personal_baselines rows
+ *  - clinical/         → Clinical Decision Support Engine (CDSS)
  *
  * `buildCopilotAnalysis` is a pure function: it turns the raw rows into the
  * visit brief inputs (latest vs previous comparison, improving/worsening
- * metrics, milestones, abnormal findings, top-5 lists). `generateCopilotBrief`
- * sends those computed statistics to the secure Convex action
+ * metrics, milestones, abnormal findings, top-5 lists) AND runs every metric
+ * through the CDSS (`evaluateReport`). The engine adds clinical meaning,
+ * severity, priority, trend interpretation, recommendations, combined
+ * findings, a risk profile and emergency detection — so the Doctor Copilot
+ * AI receives interpreted clinical context, not just metric/value pairs.
+ * `generateCopilotBrief` sends those statistics to the secure Convex action
  * `copilot:generate` (src/convex/copilot.ts), which asks the AI layer for the
- * plain-language consultation narrative. The action transparently falls back
- * between providers (Gemini primary, OpenRouter secondary) — the client never
- * knows or chooses the provider.
+ * plain-language consultation narrative.
  *
  * "Ask Doctor Copilot" (the interactive chat panel) reuses the same data:
  * `fetchLatestOcrExcerpt` + `buildCopilotChatContext` assemble a compact
  * health snapshot (reports, OCR, metrics, baselines, AI summaries,
- * comparisons) and `generateCopilotChat` sends it to the secure
- * `copilotChat:chat` action (src/convex/copilotChat.ts). All reads are
+ * comparisons, CDSS highlights) and `generateCopilotChat` sends it to the
+ * secure `copilotChat:chat` action (src/convex/copilotChat.ts). All reads are
  * RLS-scoped to the signed-in user — no other user's data can enter the
  * snapshot.
  */
@@ -126,6 +135,8 @@ export interface CopilotAnalysis {
   topQuestions: string[];
   topMonitor: string[];
   followUpTests: string[];
+  /** Clinical Decision Support output for every compared metric. */
+  cdss: ReportEvaluation;
 }
 
 /** Shape of the payload accepted by the copilot:generate action. */
@@ -149,6 +160,24 @@ export interface CopilotInput {
     populationMax: number | null;
   }>;
   previousSummaries: string[];
+  /* ---- CDSS enrichment (optional, backward compatible) ---- */
+  clinicalSummary?: string;
+  combinedFindings?: Array<{
+    finding: string;
+    confidence: number;
+    priority: string;
+    explanation: string;
+  }>;
+  riskProfile?: Array<{ label: string; level: string; score: number }>;
+  metricClinical?: Array<{
+    metricName: string;
+    clinicalMeaning: string;
+    severity: string;
+    priority: string;
+    recommendation: string;
+    trendInterpretation: string;
+    doctorReview: boolean;
+  }>;
 }
 
 export interface CopilotBrief {
@@ -214,6 +243,8 @@ export interface CopilotChatContext {
   /** Excerpt of the latest report's extracted OCR text (RLS-scoped). */
   latestOcrExcerpt: string | null;
   previousSummaries: string[];
+  /** CDSS highlights (clinical summary, findings, risks, emergencies). */
+  clinicalHighlights?: string;
 }
 
 export type CopilotChatOutcome =
@@ -380,17 +411,52 @@ function datedReports(reports: TimelineReport[]): TimelineReport[] {
     .sort((a, b) => (a.reportDate ?? "").localeCompare(b.reportDate ?? ""));
 }
 
+/** Builds a compact CDSS highlights string for the chat/voice snapshot. */
+function buildClinicalHighlights(cdss: ReportEvaluation): string {
+  const lines: string[] = [];
+  lines.push(`Clinical summary: ${cdss.summary}`);
+  if (cdss.combinedFindings.length > 0) {
+    lines.push(
+      `Combined findings: ${cdss.combinedFindings
+        .map((f) => `${f.finding} (${f.confidence}% confidence, ${f.priority} priority)`)
+        .join("; ")}`,
+    );
+  }
+  const meaningfulRisks = cdss.riskProfile.filter((r) => r.level !== "low");
+  if (meaningfulRisks.length > 0) {
+    lines.push(
+      `Risks: ${meaningfulRisks
+        .map((r) => `${r.label}: ${r.level} (${r.score}/100)`)
+        .join("; ")}`,
+    );
+  }
+  if (cdss.emergencies.length > 0) {
+    lines.push(
+      `EMERGENCY: ${cdss.emergencies
+        .map((e) => `${e.label} ${e.value ?? ""} — ${e.message}`)
+        .join(" | ")}`,
+    );
+  }
+  return lines.join("\n");
+}
+
 /**
  * Computes the full deterministic visit analysis. Pure — no network, no AI.
+ * Every compared metric is additionally run through the Clinical Decision
+ * Support Engine (`evaluateReport`) so the AI brief and chat receive
+ * interpreted clinical context (meaning, severity, priority, recommendations,
+ * combined findings, risk profile, emergencies).
  *
  * @param reports every report owned by the user (from fetchAllReports).
  * @param metrics every metric reading (from fetchMetricsForUser).
  * @param baselineCount number of personal baselines persisted (for a milestone).
+ * @param clinicalProfile optional patient profile for personalized ranges.
  */
 export function buildCopilotAnalysis(
   reports: TimelineReport[],
   metrics: TimelineMetric[],
   baselineCount = 0,
+  clinicalProfile?: ClinicalProfile | null,
 ): CopilotAnalysis {
   const dated = datedReports(reports);
   const latestReport = dated[dated.length - 1] ?? null;
@@ -402,6 +468,7 @@ export function buildCopilotAnalysis(
   const improving: string[] = [];
   const worsening: string[] = [];
   const abnormal: string[] = [];
+  const statsByMetric = new Map<string, ReturnType<typeof computeBaseline>>();
 
   for (const [metricName, history] of grouped) {
     if (history.length === 0) continue;
@@ -420,6 +487,7 @@ export function buildCopilotAnalysis(
       metricName,
       history[0].metricUnit,
     );
+    statsByMetric.set(metricName, stats);
 
     // Only metrics present in the LATEST report belong in the comparison table.
     const latestPoint = history[history.length - 1];
@@ -653,6 +721,24 @@ export function buildCopilotAnalysis(
   );
   currentSummaryParts.push(`Overall risk is ${overallRiskLevel.toLowerCase()}.`);
 
+  /* ---- CDSS: every compared metric through the clinical engine ---- */
+  const engineInputs: MetricInput[] = comparisons.map((c) => {
+    const stats = statsByMetric.get(c.metricName);
+    return {
+      metricName: c.metricName,
+      value: c.latestValue,
+      unit: c.unit,
+      populationMin: c.populationMin,
+      populationMax: c.populationMax,
+      personalBaseline: c.personalBaseline,
+      zScore: stats?.latestZScore ?? null,
+      personalClass: stats?.personalClass ?? null,
+      direction: stats?.direction ?? null,
+      percentageChange: c.changePct,
+    };
+  });
+  const cdss = evaluateReport(engineInputs, clinicalProfile ?? null);
+
   return {
     reportCount: reports.length,
     latestReport,
@@ -671,6 +757,7 @@ export function buildCopilotAnalysis(
     topQuestions: topQuestions.slice(0, TOP_N),
     topMonitor: topMonitor.slice(0, TOP_N),
     followUpTests: followUpTests.slice(0, TOP_N),
+    cdss,
   };
 }
 
@@ -699,6 +786,28 @@ export function buildCopilotInput(
       populationMax: c.populationMax,
     })),
     previousSummaries: previousSummaries.map((s) => s.summary),
+    /* ---- CDSS enrichment ---- */
+    clinicalSummary: analysis.cdss.summary,
+    combinedFindings: analysis.cdss.combinedFindings.map((f) => ({
+      finding: f.finding,
+      confidence: f.confidence,
+      priority: f.priority,
+      explanation: f.explanation,
+    })),
+    riskProfile: analysis.cdss.riskProfile.map((r) => ({
+      label: r.label,
+      level: r.level,
+      score: r.score,
+    })),
+    metricClinical: analysis.cdss.metrics.map((m) => ({
+      metricName: m.metricName,
+      clinicalMeaning: m.clinicalMeaning,
+      severity: m.severity,
+      priority: m.priority,
+      recommendation: m.recommendations[0] ?? "",
+      trendInterpretation: m.trend.clinicalInterpretation,
+      doctorReview: m.doctorReviewRequired,
+    })),
   };
 }
 
@@ -706,7 +815,8 @@ export function buildCopilotInput(
  * Builds the compact health snapshot for the Ask Doctor Copilot chat from the
  * page's already-loaded analysis + previous AI summaries + the latest OCR
  * excerpt. Pure — no additional database queries beyond the OCR read that
- * produced `latestOcrExcerpt`.
+ * produced `latestOcrExcerpt`. Includes CDSS highlights so the chat answers
+ * with interpreted clinical context.
  */
 export function buildCopilotChatContext(
   analysis: CopilotAnalysis,
@@ -734,6 +844,7 @@ export function buildCopilotChatContext(
     })),
     latestOcrExcerpt,
     previousSummaries: previousSummaries.map((s) => s.summary),
+    clinicalHighlights: buildClinicalHighlights(analysis.cdss),
   };
 }
 

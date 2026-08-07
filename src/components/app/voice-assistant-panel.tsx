@@ -40,6 +40,11 @@ import { Link } from "react-router";
  * component + sessionStorage for the current browser session — never stored
  * on a server.
  *
+ * Every answer is personalized through the Clinical Decision Support Engine:
+ * the patient profile is passed to `loadVoiceSnapshot`, which runs the CDSS
+ * `evaluatePatient` + `evaluateReport` so the assistant speaks with clinical
+ * context (meaning, severity, risk, recommendations) instead of raw values.
+ *
  * The voice footer offers a language quick-picker for the major Indian
  * languages (Hindi, Telugu, Tamil, Malayalam, Kannada) in addition to the
  * fine-grained voice dropdown. Picking a language resolves the best available
@@ -125,7 +130,7 @@ export function VoiceAssistantPanel({
   onClose,
   className = "",
 }: VoiceAssistantPanelProps) {
-  const { user, session } = useAuth();
+  const { user, session, profile } = useAuth();
 
   /* ---- health snapshot (auto-collected context, reused queries) ---- */
   const [snapshot, setSnapshot] = useState<VoiceSnapshot | null>(null);
@@ -140,7 +145,7 @@ export function VoiceAssistantPanel({
     let cancelled = false;
     setSnapshotState("loading");
     setSnapshot(null);
-    loadVoiceSnapshot(user.id)
+    loadVoiceSnapshot(user.id, profile)
       .then((loaded) => {
         if (cancelled) return;
         setSnapshot(loaded);
@@ -154,7 +159,7 @@ export function VoiceAssistantPanel({
     return () => {
       cancelled = true;
     };
-  }, [user, attempt]);
+  }, [user, profile, attempt]);
 
   /* ---- conversation (session-scoped + sessionStorage persistence) ---- */
   const [messages, setMessages] = useState<VoiceMessage[]>([]);
