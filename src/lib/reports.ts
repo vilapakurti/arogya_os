@@ -1,3 +1,4 @@
+import type { Profile } from "@/components/auth/supabase-auth-provider";
 import { getSupabase } from "@/lib/supabase";
 import { isOcrError, OcrError, runOcr } from "@/lib/ocr";
 import { parseMedicalText, type ParsedMetric } from "@/lib/parser";
@@ -7,6 +8,12 @@ import {
   saveAiInsight,
   type AiInsight,
 } from "@/lib/insights";
+import {
+  evaluateReport,
+  toClinicalProfile,
+  type ClinicalProfile,
+  type MetricInput,
+} from "@/lib/clinical";
 
 /** Storage bucket + limits for Feature 1 (AI Medical Report → Action Plan). */
 export const MEDICAL_REPORTS_BUCKET = "medical-reports";
@@ -219,6 +226,83 @@ export async function saveHealthMetrics(
   return { inserted: fresh.length, duplicates: metrics.length - fresh.length };
 }
 
+/* ------------------------------------------------------------------ */
+/* CDSS — Clinical Decision Support for the AI analysis stage          */
+/* ------------------------------------------------------------------ */
+
+/** Rounds to two decimals and strips trailing zeros for display. */
+function fmt(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  const rounded = Math.round(value * 100) / 100;
+  return Number.isInteger(rounded) ? String(rounded) : String(rounded);
+}
+
+/**
+ * Runs the parsed metrics through the Clinical Decision Support Engine and
+ * returns a compact plain-text block the AI analysis action injects into its
+ * prompt. The engine (src/lib/clinical) is the single source of severity /
+ * priority / clinical meaning / personalized reference ranges — the prompt
+ * never re-derives medical logic. Returns "" when no usable metric exists.
+ */
+export function buildClinicalContext(
+  parsed: ParsedMetric[],
+  profile: ClinicalProfile | null,
+): string {
+  const inputs: MetricInput[] = parsed
+    .filter((m) => m.metric_value !== null && Number.isFinite(m.metric_value))
+    .map((m) => ({
+      metricName: m.metric_name,
+      value: m.metric_value,
+      unit: m.unit,
+      populationMin: m.reference_range_min,
+      populationMax: m.reference_range_max,
+    }));
+  if (inputs.length === 0) return "";
+
+  const report = evaluateReport(inputs, profile);
+  const lines: string[] = [];
+  lines.push(`Clinical summary: ${report.summary}`);
+
+  for (const m of report.metrics) {
+    if (m.status === "normal") continue;
+    const range = m.referenceRange;
+    const rangeText =
+      range.min !== null || range.max !== null
+        ? ` (personalized range ${fmt(range.min)}–${fmt(range.max)} ${m.unit ?? ""})`
+        : "";
+    lines.push(
+      `${m.label}: ${fmt(m.value)} ${m.unit ?? ""} — ${m.status} (${m.severity})${rangeText}. ${m.clinicalMeaning} Priority: ${m.priority}. Recommendation: ${m.recommendations[0] ?? "Discuss this reading with your doctor."}`,
+    );
+  }
+
+  if (report.combinedFindings.length > 0) {
+    lines.push(
+      `Combined findings: ${report.combinedFindings
+        .map((f) => `${f.finding} (${f.confidence}% confidence, ${f.priority} priority)`)
+        .join("; ")}`,
+    );
+  }
+
+  const meaningfulRisks = report.riskProfile.filter((r) => r.level !== "low");
+  if (meaningfulRisks.length > 0) {
+    lines.push(
+      `Risk profile: ${meaningfulRisks
+        .map((r) => `${r.label}: ${r.level} (${r.score}/100)`)
+        .join("; ")}`,
+    );
+  }
+
+  if (report.emergencies.length > 0) {
+    lines.push(
+      `EMERGENCY: ${report.emergencies
+        .map((e) => `${e.label} ${fmt(e.value)} — ${e.message}`)
+        .join(" | ")}`,
+    );
+  }
+
+  return lines.join("\n");
+}
+
 export interface PipelineResult {
   /** Full text extracted by the OCR engine. */
   ocrText: string;
@@ -244,6 +328,8 @@ export interface RunPipelineParams {
   accessToken: string;
   /** Owner of the report; used to recompute personal baselines after success. */
   userId: string;
+  /** Optional patient profile row — personalizes the CDSS reference ranges. */
+  clinicalProfile?: Partial<Profile> | null;
   onStatus: (status: ProcessingStatus) => void;
   /** Live progress messages (OCR pages / AI stage), if desired. */
   onOcrProgress?: (message: string) => void;
@@ -257,8 +343,11 @@ export interface RunPipelineParams {
  * - extracting: real OCR (download from storage → Tesseract/pdf.js), then
  *   the Medical Data Parser turns the extracted text into structured metrics
  *   persisted into health_metrics (duplicates ignored).
- * - analyzing: Feature 3 — the AI analysis. Only the OCR text and the parsed
- *   metrics are sent (never the PDF/image), via the secure Convex action
+ * - analyzing: Feature 3 — the AI analysis. The parsed metrics are first run
+ *   through the Clinical Decision Support Engine (src/lib/clinical) so the
+ *   AI prompt receives deterministic severity / priority / clinical-meaning
+ *   context. Only the OCR text, the parsed metrics, and the compact CDSS
+ *   block are sent (never the PDF/image), via the secure Convex action
  *   (Gemini primary, OpenRouter automatic fallback). On ANY AI failure the
  *   pipeline still completes: OCR text and metrics remain saved and the UI
  *   shows "AI Analysis currently unavailable."
@@ -309,7 +398,8 @@ export async function runProcessingPipeline(
     `Parsed ${metrics.length} metric${metrics.length === 1 ? "" : "s"} · ${inserted} stored`,
   );
 
-  // AI analysis stage (Feature 3) — secure AI call through Convex.
+  // AI analysis stage (Feature 3) — secure AI call through Convex, grounded
+  // in the Clinical Decision Support Engine's deterministic interpretation.
   onStatus("analyzing");
   await updateReportProcessingStatus(reportId, "analyzing");
 
@@ -317,7 +407,11 @@ export async function runProcessingPipeline(
   let aiUnavailable = false;
   try {
     onOcrProgress?.("Consulting the AI physician…");
-    const outcome = await generateReportInsight(reportId, accessToken);
+    const clinicalContext = buildClinicalContext(
+      metrics,
+      toClinicalProfile(params.clinicalProfile ?? null),
+    );
+    const outcome = await generateReportInsight(reportId, accessToken, clinicalContext);
     if (outcome.ok) {
       ai = outcome.insight;
       await saveAiInsight({

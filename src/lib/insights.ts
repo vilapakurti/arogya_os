@@ -12,6 +12,12 @@ import { getSupabase } from "@/lib/supabase";
  * This module invokes that secure backend function and persists the result
  * into Supabase `ai_insights` (RLS-scoped to the report owner), including the
  * `provider` that produced the analysis for debugging/monitoring.
+ *
+ * The report pipeline (src/lib/reports.ts) additionally runs every parsed
+ * metric through the Clinical Decision Support Engine (src/lib/clinical) and
+ * forwards the deterministic CDSS block as `clinicalContext`, so the AI
+ * analysis is grounded in the engine's severity / priority / reference-range
+ * interpretation rather than raw metric/value pairs alone.
  */
 
 export type AiSeverity = "LOW" | "MEDIUM" | "HIGH";
@@ -79,14 +85,22 @@ function getConvexClient(): ConvexHttpClient {
  * Invokes the secure AI action. The action verifies the caller's Supabase
  * session, re-reads the report's ocr_text + health_metrics through RLS, and
  * returns a validated analysis — or a structured { ok: false, code } outcome.
+ *
+ * `clinicalContext` is the optional Clinical Decision Support (CDSS) block
+ * computed by the pipeline via the shared engine (src/lib/clinical). It
+ * grounds the model's severity grades, abnormal-value flags, and
+ * recommendations; older callers omit it and the action falls back
+ * gracefully.
  */
 export async function generateReportInsight(
   reportId: string,
   accessToken: string,
+  clinicalContext?: string,
 ): Promise<AiOutcome> {
   const result = await getConvexClient().action(api.insights.generate, {
     reportId,
     accessToken,
+    ...(clinicalContext ? { clinicalContext } : {}),
   });
   return result as AiOutcome;
 }

@@ -282,7 +282,7 @@ function OcrResultCard({ ocrText, fileName }: { ocrText: string; fileName: strin
 }
 
 export default function UploadReport() {
-  const { user, session } = useAuth();
+  const { user, session, profile } = useAuth();
   const inputRef = useRef<HTMLInputElement>(null);
 
   const [file, setFile] = useState<File | null>(null);
@@ -397,6 +397,7 @@ export default function UploadReport() {
           file,
           userId: user.id,
           accessToken: session?.access_token ?? "",
+          clinicalProfile: profile ?? null,
           onStatus: setPipelineStatus,
           onOcrProgress: setOcrMessage,
         });
@@ -421,7 +422,7 @@ export default function UploadReport() {
       setPhase("error");
       toast.error("Upload failed");
     }
-  }, [file, user, session, reportType, reportDate]);
+  }, [file, user, session, profile, reportType, reportDate]);
 
   const busy = phase === "uploading" || phase === "processing";
   const TypeIcon = file ? TYPE_ICONS[reportType] : FileUp;

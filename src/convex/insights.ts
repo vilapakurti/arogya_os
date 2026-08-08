@@ -13,14 +13,22 @@
  * a 5xx, a timeout, a network error, or an invalid key/model. Both providers
  * return the exact same schema, so the response shape never changes.
  *
+ * Clinical Decision Support (CDSS): the client runs every parsed metric of
+ * the report through the Clinical Decision Support Engine (src/lib/clinical)
+ * and passes the deterministic output (per-metric severity, priority,
+ * clinical meaning, personalized reference range, combined findings, risk
+ * profile, emergencies, overall clinical summary) in `clinicalContext`. The
+ * model is instructed to ground its severity grades and abnormal-value flags
+ * in that block — no duplicated medical logic in the prompt.
+ *
  * Security model:
  *  - The caller's Supabase access token is verified server-side against the
  *    Supabase Auth endpoint (never trusted from the client alone).
  *  - The report's OCR text and parsed metrics are re-read server-side through
  *    PostgREST using the caller's own JWT, so existing Row Level Security
  *    policies enforce ownership — a user can only analyze their own reports.
- *  - Only ocr_text + health_metrics are sent to the provider. The original
- *    PDF/image is never transmitted.
+ *  - Only ocr_text + health_metrics + the compact CDSS summary are sent to
+ *    the provider. The original PDF/image is never transmitted.
  *
  * Environment variables (set in the Keys tab / Convex env):
  *   GEMINI_API_KEY       — Google AI Studio API key (primary provider)
@@ -48,6 +56,7 @@ Rules you must follow:
 - Never diagnose diseases. Frame findings as observations and questions to explore with a doctor.
 - Always recommend consulting a qualified doctor.
 - If the data is insufficient or unclear, say so honestly and keep the severity LOW.
+- A Clinical Decision Support (CDSS) block computed by a deterministic rules engine is included (per-metric severity, priority, clinical meaning, personalized reference range, trend interpretation, combined findings, risk profile, emergencies, and an overall clinical summary). Use it to ground your "abnormal_values" flags, the overall "severity", and your recommendations. Never invent reference ranges or severity grades that contradict the CDSS block.
 - Respond with ONLY a single JSON object. No markdown, no code fences, no commentary.
 
 The JSON must match EXACTLY this schema:
@@ -78,6 +87,8 @@ export const generate = action({
   args: {
     reportId: v.string(),
     accessToken: v.string(),
+    /* CDSS enrichment (optional — older clients keep working). */
+    clinicalContext: v.optional(v.string()),
   },
   handler: async (_ctx, args) => {
     const supabaseUrl = process.env.SUPABASE_URL?.replace(/\/+$/, "");
@@ -166,13 +177,16 @@ export const generate = action({
       );
     }
 
-    // 4. Call the AI provider layer (Gemini → OpenRouter fallback) with both
-    //    the OCR text and the structured metrics.
+    // 4. Call the AI provider layer (Gemini → OpenRouter fallback) with the
+    //    OCR text, the structured metrics, and the CDSS clinical context.
     const userMessage = [
       "Please analyze this medical report.",
       "",
       "=== STRUCTURED METRICS (from health_metrics) ===",
       JSON.stringify(metrics, null, 1),
+      "",
+      "=== CLINICAL DECISION SUPPORT (CDSS) ===",
+      args.clinicalContext ?? "No clinical context available — interpret the metrics directly.",
       "",
       "=== EXTRACTED TEXT (OCR of the document) ====",
       ocrText.slice(0, MAX_OCR_CHARS),

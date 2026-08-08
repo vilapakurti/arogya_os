@@ -28,6 +28,7 @@ import {
   sdLevelOf,
   zScoreOf,
 } from "@/lib/baselines";
+import { evaluateMetric, toClinicalProfile } from "@/lib/clinical";
 import {
   fetchAllReports,
   fetchMetricHistory,
@@ -85,6 +86,12 @@ import {
  * Expanded reports show the personal baseline comparison (APBE) for each
  * metric — the user's own average and a status label derived from the z-score
  * of the reading against their baseline — alongside the population range.
+ *
+ * The Trend Analysis panel is enriched by the Clinical Decision Support
+ * Engine (src/lib/clinical): the selected metric's latest reading is run
+ * through evaluateMetric so the trend summary shows the personalized
+ * reference range, status, clinical meaning, trend interpretation with
+ * confidence and priority, and a recommendation — deterministic, no AI.
  */
 
 /** Dropdown options mapped to canonical health_metrics names. */
@@ -265,6 +272,63 @@ function TrendBadge({ direction }: { direction: TrendDirection }) {
   );
 }
 
+/** CDSS status chip for a metric reading (normal / low / high / critical). */
+function StatusChip({ status }: { status: string }) {
+  const s = status.toLowerCase();
+  const styles =
+    s === "critical"
+      ? "border-crit/50 bg-crit/15 text-crit"
+      : s === "high"
+        ? "border-warn/40 bg-warn/15 text-warn"
+        : s === "low"
+          ? "border-sky-500/30 bg-sky-500/10 text-sky-600 dark:text-sky-400"
+          : "border-ok/40 bg-ok/15 text-ok";
+  return (
+    <span
+      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${styles}`}
+    >
+      {s}
+    </span>
+  );
+}
+
+const PRIORITY_STYLES: Record<string, string> = {
+  low: "border-ok/40 bg-ok/15 text-ok",
+  medium: "border-warn/40 bg-warn/15 text-warn",
+  high: "border-crit/40 bg-crit/15 text-crit",
+  critical: "border-crit/60 bg-crit/20 text-crit",
+};
+
+/** CDSS priority chip (low / medium / high / critical). */
+function PriorityChip({ priority }: { priority: string }) {
+  const p = priority.toLowerCase();
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+        PRIORITY_STYLES[p] ?? PRIORITY_STYLES.low
+      }`}
+    >
+      <span className="size-1.5 rounded-full bg-current" />
+      {p} priority
+    </span>
+  );
+}
+
+/** Where the CDSS reference range came from (personalized vs lab vs population). */
+const RANGE_SOURCE_LABELS: Record<string, string> = {
+  personalized: "Personalized",
+  lab: "Lab",
+  population: "Population",
+  unavailable: "Unavailable",
+};
+
+const RANGE_SOURCE_STYLES: Record<string, string> = {
+  personalized: "border-primary/40 bg-primary/10 text-primary",
+  lab: "border-border/70 bg-background/60 text-muted-foreground",
+  population: "border-border/70 bg-background/60 text-muted-foreground",
+  unavailable: "border-border/70 bg-background/60 text-muted-foreground",
+};
+
 /**
  * Personal baseline comparison for one reading: status label + color derived
  * from the reading's z-score against the user's own baseline (APBE).
@@ -331,7 +395,7 @@ function PageSkeleton() {
 /* ------------------------------------------------------------------ */
 
 export default function HealthTimeline() {
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
   const navigate = useNavigate();
 
   const [reports, setReports] = useState<TimelineReport[] | null>(null);
@@ -490,6 +554,28 @@ export default function HealthTimeline() {
   }, [metricHistory, selectedDef]);
 
   const trend = useMemo(() => calculateTrend(metricHistory), [metricHistory]);
+
+  /** Patient profile converted for the Clinical Decision Support Engine. */
+  const clinicalProfile = useMemo(() => toClinicalProfile(profile), [profile]);
+
+  /**
+   * CDSS evaluation of the selected metric's latest reading. Drives the
+   * clinical interpretation panel inside the Trend Summary (personalized
+   * reference range, status, clinical meaning, trend interpretation with
+   * confidence + priority, and a recommendation).
+   */
+  const metricEvaluation = useMemo(
+    () =>
+      selectedMetric &&
+      trend.latestValue !== null &&
+      trend.latestValue !== undefined
+        ? evaluateMetric(
+            { metricName: selectedMetric, value: trend.latestValue, unit: selectedUnit },
+            clinicalProfile,
+          )
+        : null,
+    [selectedMetric, trend.latestValue, selectedUnit, clinicalProfile],
+  );
 
   const chartData = useMemo(
     () =>
@@ -824,6 +910,69 @@ export default function HealthTimeline() {
                   </dd>
                 </div>
               </dl>
+
+              {/* Clinical Decision Support — deterministic interpretation */}
+              {metricEvaluation && (
+                <div className="mt-4 space-y-3 border-t border-border/60 pt-4">
+                  <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                    Clinical Interpretation
+                  </p>
+
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[13px] text-muted-foreground">Reference Range</span>
+                    <span className="flex items-center gap-2">
+                      <span className="tnum font-mono text-sm font-medium text-foreground">
+                        {metricEvaluation.referenceRange.min === null &&
+                        metricEvaluation.referenceRange.max === null
+                          ? "—"
+                          : `${formatNumber(metricEvaluation.referenceRange.min)} – ${formatNumber(
+                              metricEvaluation.referenceRange.max,
+                            )} ${selectedUnit}`}
+                      </span>
+                      <span
+                        className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                          RANGE_SOURCE_STYLES[metricEvaluation.referenceRange.source] ??
+                          RANGE_SOURCE_STYLES.unavailable
+                        }`}
+                      >
+                        {RANGE_SOURCE_LABELS[metricEvaluation.referenceRange.source] ??
+                          "Unavailable"}
+                      </span>
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[13px] text-muted-foreground">Status</span>
+                    <StatusChip status={metricEvaluation.status} />
+                  </div>
+
+                  <p className="text-[12px] leading-5 text-foreground/85">
+                    {metricEvaluation.clinicalMeaning}
+                  </p>
+
+                  <div className="rounded-xl border border-border/60 bg-background/40 px-3 py-2.5">
+                    <p className="text-[12px] leading-5 text-foreground/85">
+                      {metricEvaluation.trend.clinicalInterpretation}
+                    </p>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <span className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-background/60 px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">
+                        Confidence {metricEvaluation.trend.confidence}%
+                      </span>
+                      <PriorityChip priority={metricEvaluation.trend.priority} />
+                      {metricEvaluation.doctorReviewRequired && (
+                        <span className="inline-flex items-center rounded-full border border-crit/40 bg-crit/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-crit">
+                          Doctor review recommended
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <p className="flex items-start gap-1.5 text-[12px] leading-5 text-muted-foreground">
+                    <ArrowRight className="mt-0.5 size-3.5 shrink-0 text-primary" />
+                    {metricEvaluation.recommendations[0]}
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         </div>
