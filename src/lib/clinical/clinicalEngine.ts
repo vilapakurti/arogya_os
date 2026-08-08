@@ -158,7 +158,8 @@ export function evaluateTrend(
 
 /**
  * Detects immediately critical values (potassium, sodium, glucose,
- * creatinine, troponin, hemoglobin, platelets, oxygen saturation, …).
+ * creatinine, troponin, hemoglobin, platelets, oxygen saturation,
+ * hypertensive blood pressure, very high triglycerides, …).
  */
 export function evaluateEmergency(inputs: MetricInput[]): EmergencyFinding[] {
   const findings: EmergencyFinding[] = [];
@@ -211,6 +212,14 @@ export function evaluateMetric(
       ? { min: input.populationMin ?? null, max: input.populationMax ?? null }
       : null;
   const personalBaseline = input.personalBaseline ?? null;
+  /**
+   * A reading that has a value but NO usable reference range (no rule, no lab
+   * range, and no unit conversion) cannot be classified. We never fabricate
+   * an interpretation for it: severity stays "unknown" and the clinical
+   * meaning states that the range is missing.
+   */
+  const unclassified =
+    value !== null && referenceRange.min === null && referenceRange.max === null;
 
   // ---- status ----
   let status: StatusLevel = "normal";
@@ -230,7 +239,8 @@ export function evaluateMetric(
   }
 
   // ---- severity ----
-  let severity: SeverityLevel = value === null ? "unknown" : STATUS_SEVERITY[status];
+  let severity: SeverityLevel =
+    value === null || unclassified ? "unknown" : STATUS_SEVERITY[status];
   if (status === "critical") severity = "critical";
   else if ((status === "low" || status === "high") && value !== null) {
     severity = severityFromDeviation(value, referenceRange);
@@ -252,19 +262,23 @@ export function evaluateMetric(
   );
 
   // ---- clinical meaning ----
-  const baseMeaning =
-    rule.meanings[status] ??
-    (value === null
-      ? "No reading available for this metric."
-      : `Value ${value} ${unit ?? ""} — ${status} relative to the reference range.`);
+  const baseMeaning = unclassified
+    ? `No reference range is available for ${label} (value ${value} ${unit ?? ""}), so it cannot be classified at this time.`
+    : rule.meanings[status] ??
+      (value === null
+        ? "No reading available for this metric."
+        : `Value ${value} ${unit ?? ""} — ${status} relative to the reference range.`);
   const clinicalMeaning =
     baseMeaning + (earlyWarning ? ` ${earlyWarning}` : "");
 
   // ---- causes / risks / recommendations ----
-  const possibleCauses = value === null ? [] : (rule.causes[status] ?? []);
-  const possibleRisks = value === null ? [] : (rule.risks[status] ?? []);
-  const recommendations =
-    value === null
+  const possibleCauses =
+    value === null || unclassified ? [] : (rule.causes[status] ?? []);
+  const possibleRisks =
+    value === null || unclassified ? [] : (rule.risks[status] ?? []);
+  const recommendations = unclassified
+    ? ["Ask your doctor to interpret this reading using the laboratory's reference range."]
+    : value === null
       ? []
       : rule.recommendations[status] ?? [
           status === "normal"
@@ -283,7 +297,7 @@ export function evaluateMetric(
   });
 
   // ---- priority ----
-  let priority: PriorityLevel = priorityFromSeverity(severity);
+  let priority: PriorityLevel = unclassified ? "low" : priorityFromSeverity(severity);
   if (status === "critical") priority = "critical";
   if (trend.priority === "medium" && PRIORITY_RANK[priority] < PRIORITY_RANK.medium) {
     priority = "medium";
@@ -295,6 +309,7 @@ export function evaluateMetric(
   // ---- doctor review ----
   const doctorReviewRequired =
     value !== null &&
+    !unclassified &&
     (SEVERITY_RANK[severity] >= SEVERITY_RANK.severe ||
       status === "critical" ||
       Boolean(earlyWarning));
@@ -336,6 +351,12 @@ export function evaluateMetric(
   };
 }
 
+/**
+ * Deviation-based severity. Deliberately capped at "severe": only a metric's
+ * emergency thresholds (status "critical") may produce a "critical"
+ * classification. Deviation alone must not turn an ordinary abnormal result
+ * (e.g. glucose 180 mg/dL, Hb 9.5 g/dL) into an emergency.
+ */
 function severityFromDeviation(
   value: number,
   range: ReferenceRange,
@@ -349,7 +370,6 @@ function severityFromDeviation(
   if (distance <= 0) return "normal";
   const denom = width && width > 0 ? width : Math.abs(value) * 0.1 || 1;
   const ratio = distance / denom;
-  if (ratio >= 0.5) return "critical";
   if (ratio >= 0.25) return "severe";
   if (ratio >= 0.1) return "moderate";
   return "mild";

@@ -7,6 +7,15 @@
  * trimester, exercise level, and known conditions. When the report provides a
  * lab reference range and the metric has no dedicated rule, the lab range is
  * used as-is.
+ *
+ * Unit safety: rules are written in one canonical unit (rule.unit). When a
+ * report expresses a reading in a different unit (e.g. glucose in mmol/L,
+ * creatinine in µmol/L), the rule's range is converted via the rule's
+ * `unitConversions` table BEFORE any comparison. If no conversion exists for
+ * the report's unit, the lab-provided range (already in the report's unit) is
+ * preferred, and if neither exists the range is marked unavailable — the
+ * engine never compares values expressed in different units without
+ * conversion.
  */
 
 import {
@@ -23,11 +32,31 @@ const SENIOR_CREATININE_MIN = 0.6;
 const SENIOR_CREATININE_MAX = 1.1;
 
 /**
+ * Normalizes a unit string into a lookup key: lowercase, no whitespace,
+ * and "µ"/"μ" folded to "u" so "µmol/L" and "umol/L" resolve identically.
+ */
+function unitKey(unit: string | null | undefined): string | null {
+  if (!unit || !unit.trim()) return null;
+  return unit.trim().toLowerCase().replace(/\s+/g, "").replace(/[µμ]/g, "u");
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+/** Formats a conversion factor for a human-readable rationale. */
+function fmtFactor(factor: number): string {
+  const r = round2(factor);
+  return Number.isInteger(r) ? String(r) : String(r);
+}
+
+/**
  * Resolves the reference range for a metric given a patient profile.
  *
  * @param metricName canonical metric name.
  * @param profile optional patient factors; null → population defaults.
- * @param input optional reading (used to fall back to the lab-provided range).
+ * @param input optional reading (used to fall back to the lab-provided range
+ *        and to detect the unit the report actually used).
  */
 export function getReferenceRange(
   metricName: string,
@@ -35,9 +64,10 @@ export function getReferenceRange(
   input?: MetricInput | null,
 ): ReferenceRange {
   const rule = getRule(metricName);
+  const hasRule = rule.populationMin != null || rule.populationMax != null;
 
   // No dedicated rule → prefer the lab range written on the report.
-  if (rule.populationMin == null && rule.populationMax == null) {
+  if (!hasRule) {
     const hasLab = input?.populationMin != null || input?.populationMax != null;
     if (hasLab) {
       return {
@@ -51,14 +81,54 @@ export function getReferenceRange(
   }
 
   const { min, max, rationale } = personalizeRange(rule, profile);
-  if (min == null && max == null) {
+  let finalMin = min;
+  let finalMax = max;
+  const finalRationale = [...rationale];
+
+  // Unit-aware resolution: if the report used a different unit than the
+  // rule's canonical unit, convert the rule range into the report's unit.
+  // Never compare rule-unit bounds against values expressed in another unit.
+  const inputUnit = unitKey(input?.unit);
+  const ruleUnit = unitKey(rule.unit);
+  if (inputUnit && ruleUnit && inputUnit !== ruleUnit) {
+    const factor = rule.unitConversions?.[inputUnit];
+    if (factor !== undefined) {
+      if (finalMin !== null) finalMin = round2(finalMin * factor);
+      if (finalMax !== null) finalMax = round2(finalMax * factor);
+      finalRationale.push(
+        `Converted from ${rule.unit} to ${input?.unit} (×${fmtFactor(factor)}).`,
+      );
+    } else {
+      // No conversion available for the report's unit — fall back to the lab
+      // range (already in the report's unit), else mark unavailable.
+      const hasLab = input?.populationMin != null || input?.populationMax != null;
+      if (hasLab) {
+        return {
+          min: input?.populationMin ?? null,
+          max: input?.populationMax ?? null,
+          source: "lab",
+          rationale: [
+            `Reference range as printed on the report (${input?.unit}); no engine rule exists for this unit.`,
+          ],
+        };
+      }
+      return {
+        min: null,
+        max: null,
+        source: "unavailable",
+        rationale: [`No reference range available for unit ${input?.unit}.`],
+      };
+    }
+  }
+
+  if (finalMin == null && finalMax == null) {
     return { min: null, max: null, source: "unavailable", rationale: [] };
   }
   return {
-    min,
-    max,
-    source: rationale.length > 0 ? "personalized" : "population",
-    rationale,
+    min: finalMin,
+    max: finalMax,
+    source: finalRationale.length > 0 ? "personalized" : "population",
+    rationale: finalRationale,
   };
 }
 
@@ -115,7 +185,8 @@ function personalizeRange(
     }
   }
 
-  // Exercise level (e.g. athletes)
+  // Exercise level (e.g. athletes) — currently no rule declares an athlete
+  // override, and one should only be added with explicit clinical basis.
   if (p.exerciseLevel === "athlete" && rule.personalized?.byExercise?.athlete) {
     adjust(rule.personalized.byExercise.athlete, "Adjusted for athlete-level exercise.");
   }

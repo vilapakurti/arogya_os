@@ -5,6 +5,10 @@
  * Recognizes clinically meaningful multi-metric patterns (e.g. high HbA1c +
  * high blood sugar → possible diabetes progression). Patterns are declared as
  * data below; adding a pattern = adding an entry, no engine changes.
+ *
+ * IMPORTANT: these are PATTERNS, not diagnoses. Every finding title uses
+ * hedged language ("Possible …", "… Pattern", "… Risk Cluster"). Abnormal
+ * values alone never produce a definitive diagnostic statement.
  */
 
 import { getRule } from "./clinicalRules";
@@ -108,11 +112,11 @@ const PATTERNS: PatternDef[] = [
   },
   {
     id: "inflammatory_process",
-    finding: "Inflammatory Process",
+    finding: "Possible Inflammatory Process",
     priority: "high",
     doctorReview: true,
     explanation:
-      "CRP and ESR are both elevated — together they indicate an ongoing inflammatory process.",
+      "CRP and ESR are both elevated — the pattern is consistent with an ongoing inflammatory process; clinical correlation is required.",
     metrics: [
       { metricName: "crp", status: "high" },
       { metricName: "esr", status: "high" },

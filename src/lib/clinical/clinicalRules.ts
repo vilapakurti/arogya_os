@@ -10,6 +10,17 @@
  * support and education only. They are not diagnostic cut-offs. Every output
  * must be confirmed by a clinician.
  *
+ * Source traceability: each rule carries `source` metadata naming the
+ * guideline / body the threshold is based on. Where a threshold is a
+ * laboratory-dependent reference interval (varies by lab, assay, age, sex,
+ * pregnancy, or methodology), `review: true` marks it for clinician
+ * verification — an exact citation is intentionally NOT invented for it.
+ *
+ * Unit handling: rules are written in one canonical unit (rule.unit). The
+ * `unitConversions` map converts the rule's range into the unit a report
+ * actually used (e.g. glucose in mmol/L) so the engine never compares values
+ * expressed in different units without conversion.
+ *
  * Rule shape:
  *  - populationMin/Max        base reference range (before personalization)
  *  - lowerIsBetter            a LOWER value is the healthy direction
@@ -21,6 +32,8 @@
  *                             of the personalized range)
  *  - riskContributions        weights fed to the risk engine per status level
  *  - personalized             reference-range adjustments per demographics
+ *  - unitConversions          rule-unit → report-unit numeric multipliers
+ *  - source                   traceability metadata for the threshold
  */
 
 import type {
@@ -59,6 +72,21 @@ export interface RangeOverride {
   max?: number;
 }
 
+/** Traceability metadata for a clinical threshold. */
+export interface RuleSource {
+  /** Organization / body behind the threshold. */
+  source: string;
+  /** Guideline or document name, when known. */
+  guideline?: string;
+  /** Year or edition (e.g. "2018" or "current edition (2026)"). */
+  year?: number | string;
+  /** Free-text pointer to the relevant cut-off (never a fabricated URL). */
+  reference?: string;
+  /** True when the exact threshold is lab/assay/methodology-dependent and
+   *  needs clinician verification rather than a hard citation. */
+  review?: boolean;
+}
+
 export interface MetricRule {
   label: string;
   unit: string;
@@ -82,6 +110,16 @@ export interface MetricRule {
     byCondition?: Record<string, RangeOverride>;
     byExercise?: { athlete?: RangeOverride };
   };
+  /**
+   * Converts values in the rule's canonical unit into a report's unit:
+   * `value_in_rule_unit × factor = value_in_report_unit`. Keys are the
+   * normalized report unit strings (lowercase, no spaces, "µ"→"u").
+   * Used so the engine never compares rule-unit ranges against values
+   * expressed in another unit.
+   */
+  unitConversions?: Record<string, number>;
+  /** Traceability for the threshold (see RuleSource above). */
+  source?: RuleSource;
 }
 
 /* ------------------------------------------------------------------ */
@@ -134,6 +172,14 @@ export const METRIC_RULES: Record<string, MetricRule> = {
       byPregnant: { min: 11, max: 14 },
       byAgeCategory: { child: { min: 11.5, max: 15.5 } },
     },
+    unitConversions: { "g/l": 10 },
+    source: {
+      source: "WHO",
+      guideline: "Haemoglobin concentrations for the diagnosis of anaemia and assessment of severity",
+      year: 2011,
+      reference: "Anaemia cut-offs: men <13.0 g/dL, non-pregnant women <12.0, pregnant <11.0",
+      review: true,
+    },
   },
 
   rbc: {
@@ -164,6 +210,12 @@ export const METRIC_RULES: Record<string, MetricRule> = {
       },
       byPregnant: { min: 3.8, max: 5.2 },
     },
+    unitConversions: { "million/ul": 1 },
+    source: {
+      source: "General laboratory reference",
+      reference: "RBC reference intervals vary by lab and altitude; gender-specific ranges used",
+      review: true,
+    },
   },
 
   wbc: {
@@ -187,6 +239,12 @@ export const METRIC_RULES: Record<string, MetricRule> = {
     trendMeaning: { increasing: "WBC is rising", decreasing: "WBC is falling" },
     trendRecommendation: { improving: "Continue monitoring", stable: "Continue monitoring", worsening: "Worth discussing with your doctor" },
     riskContributions: { inflammation: 20 },
+    unitConversions: { "10^9/l": 1 },
+    source: {
+      source: "General laboratory reference",
+      reference: "4.0–11.0 ×10⁹/L widely used",
+      review: true,
+    },
   },
 
   platelets: {
@@ -215,6 +273,12 @@ export const METRIC_RULES: Record<string, MetricRule> = {
       max: 20,
       flag: "critically_low_platelets",
       message: "Platelets are critically low — risk of bleeding. Seek immediate medical attention.",
+    },
+    unitConversions: { "10^9/l": 1 },
+    source: {
+      source: "General laboratory reference",
+      reference: "150–450 ×10⁹/L widely used; <20 ×10⁹/L associated with major bleeding risk",
+      review: true,
     },
   },
 
@@ -250,6 +314,13 @@ export const METRIC_RULES: Record<string, MetricRule> = {
       byPregnant: { max: 92 },
       byCondition: { diabetes: { min: 80, max: 130, } },
     },
+    unitConversions: { "mmol/l": 1 / 18.016 },
+    source: {
+      source: "ADA",
+      guideline: "Standards of Care in Diabetes",
+      year: "current edition (2026)",
+      reference: "Fasting <100 mg/dL normal; 100–125 impaired fasting glucose; ≥126 mg/dL diabetes; pregnancy fasting <92 mg/dL",
+    },
   },
 
   hba1c: {
@@ -280,6 +351,12 @@ export const METRIC_RULES: Record<string, MetricRule> = {
       byPregnant: { max: 5.4 },
       byCondition: { diabetes: { min: 4, max: 7 } },
     },
+    source: {
+      source: "ADA",
+      guideline: "Standards of Care in Diabetes",
+      year: "current edition (2026)",
+      reference: "Normal <5.7%; prediabetes 5.7–6.4%; diabetes ≥6.5%; general adult treatment target <7.0%",
+    },
   },
 
   /* ---- Lipids ---- */
@@ -299,6 +376,12 @@ export const METRIC_RULES: Record<string, MetricRule> = {
     trendMeaning: { increasing: "Cholesterol is rising", decreasing: "Cholesterol is improving" },
     trendRecommendation: { improving: "Improving — continue current approach", stable: "Continue monitoring", worsening: "Rising cholesterol — discuss with your doctor" },
     riskContributions: { cardiovascular: 20, metabolic: 10 },
+    unitConversions: { "mmol/l": 1 / 38.67 },
+    source: {
+      source: "NCEP ATP III",
+      year: 2001,
+      reference: "Desirable <200 mg/dL; borderline 200–239; high ≥240",
+    },
   },
 
   ldl: {
@@ -318,6 +401,13 @@ export const METRIC_RULES: Record<string, MetricRule> = {
     trendRecommendation: { improving: "Improving — continue current approach", stable: "Continue monitoring", worsening: "Rising LDL — discuss with your doctor" },
     riskContributions: { cardiovascular: 30, metabolic: 10 },
     personalized: { byCondition: { diabetes: { max: 70 }, heart_disease: { max: 70 } } },
+    unitConversions: { "mmol/l": 1 / 38.67 },
+    source: {
+      source: "ACC/AHA + NCEP ATP III",
+      guideline: "2018 Guideline on the Management of Blood Cholesterol",
+      year: 2018,
+      reference: "Optimal <100 mg/dL; <70 mg/dL for ASCVD/high-risk; ≥190 mg/dL very high",
+    },
   },
 
   hdl: {
@@ -338,6 +428,12 @@ export const METRIC_RULES: Record<string, MetricRule> = {
     trendRecommendation: { improving: "Improving — continue current approach", stable: "Continue monitoring", worsening: "Falling HDL — discuss with your doctor" },
     riskContributions: { cardiovascular: 20 },
     personalized: { byGender: { male: { min: 40 }, female: { min: 50 } } },
+    unitConversions: { "mmol/l": 1 / 38.67 },
+    source: {
+      source: "NCEP ATP III",
+      year: 2001,
+      reference: "Low: <40 mg/dL (men), <50 mg/dL (women); ≥60 mg/dL protective",
+    },
   },
 
   triglycerides: {
@@ -349,13 +445,26 @@ export const METRIC_RULES: Record<string, MetricRule> = {
     meanings: {
       normal: "Within the expected range.",
       high: "Triglycerides are above the expected range.",
+      critical: "Very high triglycerides — risk of pancreatitis.",
     },
     causes: { high: ["Carbohydrate/alcohol intake", "Metabolic factors", "Genetics"] },
-    risks: { high: ["Cardiovascular risk", "Pancreatitis risk at very high levels"] },
-    recommendations: { high: ["Discuss with your doctor", "Reduce alcohol and refined carbohydrates"] },
+    risks: { high: ["Cardiovascular risk", "Pancreatitis risk at very high levels"], critical: ["Pancreatitis"] },
+    recommendations: { high: ["Discuss with your doctor", "Reduce alcohol and refined carbohydrates"], critical: ["Seek medical attention"] },
     trendMeaning: { increasing: "Triglycerides are rising", decreasing: "Triglycerides are improving" },
     trendRecommendation: { improving: "Improving — continue current approach", stable: "Continue monitoring", worsening: "Rising triglycerides — discuss with your doctor" },
+    emergency: {
+      min: undefined,
+      max: 1000,
+      flag: "very_high_triglycerides",
+      message: "Triglycerides are very high — risk of pancreatitis. Seek medical attention.",
+    },
     riskContributions: { cardiovascular: 20, metabolic: 20 },
+    unitConversions: { "mmol/l": 1 / 88.57 },
+    source: {
+      source: "NCEP ATP III / ACC-AHA",
+      year: 2001,
+      reference: "Normal <150 mg/dL; borderline 150–199; high 200–499; very high ≥500; pancreatitis risk increases above ~1000",
+    },
   },
 
   /* ---- Kidney ---- */
@@ -385,6 +494,14 @@ export const METRIC_RULES: Record<string, MetricRule> = {
       byGender: { male: { min: 0.7, max: 1.3 }, female: { min: 0.6, max: 1.1 } },
       byCondition: { kidney_disease: { max: 1.2 } },
     },
+    unitConversions: { "umol/l": 88.42 },
+    source: {
+      source: "KDIGO",
+      guideline: "KDIGO Clinical Practice Guideline for the Evaluation and Management of Chronic Kidney Disease",
+      year: 2012,
+      reference: "Reference intervals vary by lab and muscle mass; staging is eGFR-based",
+      review: true,
+    },
   },
 
   urea: {
@@ -404,6 +521,12 @@ export const METRIC_RULES: Record<string, MetricRule> = {
     trendMeaning: { increasing: "Urea is rising", decreasing: "Urea is improving" },
     trendRecommendation: { improving: "Improving — continue current approach", stable: "Continue monitoring", worsening: "Rising urea — discuss with your doctor" },
     riskContributions: { kidney: 25 },
+    unitConversions: { "mmol/l": 0.357 },
+    source: {
+      source: "General laboratory reference",
+      reference: "BUN 7–20 mg/dL typical (1 mg/dL BUN ≈ 0.357 mmol/L urea)",
+      review: true,
+    },
   },
 
   /* ---- Blood pressure ---- */
@@ -417,14 +540,30 @@ export const METRIC_RULES: Record<string, MetricRule> = {
       low: "Systolic pressure below the expected range.",
       normal: "Within the expected range.",
       high: "Systolic pressure is above the expected range.",
+      critical: "Systolic pressure is at crisis level.",
     },
     causes: { high: ["Stress", "Salt intake", "Hypertension", "Obesity"] },
-    risks: { high: ["Hypertension", "Cardiovascular risk"] },
-    recommendations: { high: ["Discuss blood pressure with your doctor", "Review salt intake and activity"] },
+    risks: { high: ["Hypertension", "Cardiovascular risk"], critical: ["Hypertensive crisis"] },
+    recommendations: {
+      high: ["Discuss blood pressure with your doctor", "Review salt intake and activity"],
+      critical: ["Seek immediate medical attention"],
+    },
     trendMeaning: { increasing: "Systolic pressure is rising", decreasing: "Systolic pressure is improving" },
     trendRecommendation: { improving: "Improving — continue current approach", stable: "Continue monitoring", worsening: "Rising blood pressure — discuss with your doctor" },
+    emergency: {
+      min: undefined,
+      max: 180,
+      flag: "hypertensive_crisis",
+      message: "Blood pressure is at crisis level (≥180) — seek immediate medical attention.",
+    },
     riskContributions: { cardiovascular: 25 },
     personalized: { byCondition: { hypertension: { max: 130 } }, byPregnant: { max: 120 } },
+    source: {
+      source: "ACC/AHA",
+      guideline: "2017 Guideline for the Prevention, Detection, Evaluation, and Management of High Blood Pressure in Adults",
+      year: 2017,
+      reference: "Normal <120; elevated 120–129; stage 1 HTN 130–139; stage 2 ≥140; crisis ≥180",
+    },
   },
 
   blood_pressure_diastolic: {
@@ -437,14 +576,30 @@ export const METRIC_RULES: Record<string, MetricRule> = {
       low: "Diastolic pressure below the expected range.",
       normal: "Within the expected range.",
       high: "Diastolic pressure is above the expected range.",
+      critical: "Diastolic pressure is at crisis level.",
     },
     causes: { high: ["Stress", "Salt intake", "Hypertension"] },
-    risks: { high: ["Hypertension", "Cardiovascular risk"] },
-    recommendations: { high: ["Discuss blood pressure with your doctor", "Review lifestyle factors"] },
+    risks: { high: ["Hypertension", "Cardiovascular risk"], critical: ["Hypertensive crisis"] },
+    recommendations: {
+      high: ["Discuss blood pressure with your doctor", "Review lifestyle factors"],
+      critical: ["Seek immediate medical attention"],
+    },
     trendMeaning: { increasing: "Diastolic pressure is rising", decreasing: "Diastolic pressure is improving" },
     trendRecommendation: { improving: "Improving — continue current approach", stable: "Continue monitoring", worsening: "Rising blood pressure — discuss with your doctor" },
+    emergency: {
+      min: undefined,
+      max: 120,
+      flag: "hypertensive_crisis",
+      message: "Blood pressure is at crisis level (≥120 diastolic) — seek immediate medical attention.",
+    },
     riskContributions: { cardiovascular: 20 },
-    personalized: { byCondition: { hypertension: { max: 85 } }, byPregnant: { max: 80 } },
+    personalized: { byCondition: { hypertension: { max: 80 } }, byPregnant: { max: 80 } },
+    source: {
+      source: "ACC/AHA",
+      guideline: "2017 Guideline for the Prevention, Detection, Evaluation, and Management of High Blood Pressure in Adults",
+      year: 2017,
+      reference: "Normal <80; stage 1 HTN 80–89; stage 2 ≥90; crisis ≥120",
+    },
   },
 
   /* ---- Electrolytes (emergency-relevant) ---- */
@@ -466,6 +621,12 @@ export const METRIC_RULES: Record<string, MetricRule> = {
     trendMeaning: { increasing: "Potassium is rising", decreasing: "Potassium is falling" },
     trendRecommendation: { improving: "Continue monitoring", stable: "Continue monitoring", worsening: "Movement away from normal — discuss with your doctor" },
     emergency: { min: 2.5, max: 6.5, flag: "dangerous_potassium", message: "Potassium is dangerously out of range — cardiac risk. Seek immediate medical attention." },
+    unitConversions: { "meq/l": 1 },
+    source: {
+      source: "General laboratory reference",
+      reference: "3.5–5.0 mmol/L (mEq/L ≈ mmol/L for monovalent ions); severe <2.5 or >6.5",
+      review: true,
+    },
   },
 
   sodium: {
@@ -486,6 +647,12 @@ export const METRIC_RULES: Record<string, MetricRule> = {
     trendMeaning: { increasing: "Sodium is rising", decreasing: "Sodium is falling" },
     trendRecommendation: { improving: "Continue monitoring", stable: "Continue monitoring", worsening: "Movement away from normal — discuss with your doctor" },
     emergency: { min: 120, max: 160, flag: "dangerous_sodium", message: "Sodium is dangerously out of range. Seek immediate medical attention." },
+    unitConversions: { "meq/l": 1 },
+    source: {
+      source: "General laboratory reference",
+      reference: "135–145 mmol/L (mEq/L ≈ mmol/L); severe <120 or >160",
+      review: true,
+    },
   },
 
   /* ---- Cardiac markers ---- */
@@ -506,6 +673,12 @@ export const METRIC_RULES: Record<string, MetricRule> = {
     trendRecommendation: { improving: "Falling troponin — continue medical follow-up", stable: "Continue medical follow-up", worsening: "Rising troponin — urgent medical review" },
     emergency: { min: undefined, max: 0.5, flag: "elevated_troponin", message: "Troponin is markedly elevated — seek immediate emergency care." },
     riskContributions: { cardiovascular: 40 },
+    source: {
+      source: "IFCC",
+      guideline: "Assay-specific 99th percentile upper reference limit",
+      reference: "Elevation above the 99th percentile of a healthy reference population is assay-dependent",
+      review: true,
+    },
   },
 
   /* ---- Oxygenation ---- */
@@ -525,6 +698,11 @@ export const METRIC_RULES: Record<string, MetricRule> = {
     trendMeaning: { increasing: "Oxygen saturation is improving", decreasing: "Oxygen saturation is falling" },
     trendRecommendation: { improving: "Improving — continue monitoring", stable: "Continue monitoring", worsening: "Falling oxygen saturation — seek medical evaluation" },
     emergency: { min: undefined, max: 85, flag: "low_oxygen_saturation", message: "Oxygen saturation is critically low — seek immediate medical attention." },
+    source: {
+      source: "General respiratory reference",
+      reference: "Normal ≥95%; hypoxemia <90%; <85 severe",
+      review: true,
+    },
   },
 
   /* ---- Liver ---- */
@@ -545,6 +723,11 @@ export const METRIC_RULES: Record<string, MetricRule> = {
     trendRecommendation: { improving: "Improving — continue current approach", stable: "Continue monitoring", worsening: "Rising ALT — discuss with your doctor" },
     riskContributions: { liver: 35 },
     personalized: { byCondition: { liver_disease: { max: 56 } } },
+    source: {
+      source: "General laboratory reference",
+      reference: "Reference intervals vary by lab and sex (commonly 7–56 U/L)",
+      review: true,
+    },
   },
 
   ast: {
@@ -564,6 +747,11 @@ export const METRIC_RULES: Record<string, MetricRule> = {
     trendRecommendation: { improving: "Improving — continue current approach", stable: "Continue monitoring", worsening: "Rising AST — discuss with your doctor" },
     riskContributions: { liver: 30 },
     personalized: { byCondition: { liver_disease: { max: 40 } } },
+    source: {
+      source: "General laboratory reference",
+      reference: "Reference intervals vary by lab (commonly 10–40 U/L)",
+      review: true,
+    },
   },
 
   total_bilirubin: {
@@ -579,6 +767,11 @@ export const METRIC_RULES: Record<string, MetricRule> = {
     trendMeaning: { increasing: "Bilirubin is rising", decreasing: "Bilirubin is improving" },
     trendRecommendation: { improving: "Improving — continue monitoring", stable: "Continue monitoring", worsening: "Rising bilirubin — discuss with your doctor" },
     riskContributions: { liver: 20 },
+    source: {
+      source: "General laboratory reference",
+      reference: "Typical <1.2 mg/dL",
+      review: true,
+    },
   },
 
   /* ---- Inflammation ---- */
@@ -598,6 +791,11 @@ export const METRIC_RULES: Record<string, MetricRule> = {
     trendMeaning: { increasing: "Inflammation marker rising", decreasing: "Inflammation marker improving" },
     trendRecommendation: { improving: "Improving — continue monitoring", stable: "Continue monitoring", worsening: "Rising CRP — discuss with your doctor" },
     riskContributions: { inflammation: 35, cardiovascular: 10 },
+    source: {
+      source: "General laboratory reference",
+      reference: "Standard CRP <10 mg/L; hs-CRP <1 low / 1–3 moderate / >3 mg/L high cardiovascular risk",
+      review: true,
+    },
   },
 
   esr: {
@@ -617,6 +815,11 @@ export const METRIC_RULES: Record<string, MetricRule> = {
     trendRecommendation: { improving: "Improving — continue monitoring", stable: "Continue monitoring", worsening: "Rising ESR — discuss with your doctor" },
     riskContributions: { inflammation: 30 },
     personalized: { byPregnant: { max: 30 }, byGender: { female: { max: 25 } } },
+    source: {
+      source: "General laboratory reference (Westergren)",
+      reference: "Age/sex adjusted: men ≈ age/2, women ≈ (age+10)/2 mm/hr",
+      review: true,
+    },
   },
 
   temperature: {
@@ -635,6 +838,10 @@ export const METRIC_RULES: Record<string, MetricRule> = {
     trendMeaning: { increasing: "Temperature is rising", decreasing: "Temperature is normalizing" },
     trendRecommendation: { improving: "Normalizing — continue monitoring", stable: "Continue monitoring", worsening: "Rising temperature — monitor closely" },
     riskContributions: { inflammation: 20 },
+    source: {
+      source: "General clinical reference",
+      reference: "36.1–37.2 °C oral",
+    },
   },
 
   /* ---- Thyroid ---- */
@@ -654,7 +861,20 @@ export const METRIC_RULES: Record<string, MetricRule> = {
     recommendations: { low: ["Discuss thyroid function with your doctor"], high: ["Discuss thyroid function with your doctor"] },
     trendMeaning: { increasing: "TSH is rising", decreasing: "TSH is falling" },
     trendRecommendation: { improving: "Continue monitoring", stable: "Continue monitoring", worsening: "Movement away from normal — discuss with your doctor" },
-    personalized: { byPregnant: { min: 0.1, max: 2.5 } },
+    personalized: {
+      byPregnant: { min: 0.1, max: 2.5 },
+      byTrimester: {
+        first: { min: 0.1, max: 2.5 },
+        second: { min: 0.2, max: 3.0 },
+        third: { min: 0.3, max: 3.0 },
+      },
+    },
+    source: {
+      source: "ATA",
+      guideline: "2017 Guidelines of the American Thyroid Association for the Diagnosis and Management of Thyroid Disease During Pregnancy and the Postpartum",
+      year: 2017,
+      reference: "Population 0.4–4.0 mIU/L; pregnancy: 1st trimester 0.1–2.5, 2nd 0.2–3.0, 3rd 0.3–3.0",
+    },
   },
 
   ferritin: {
@@ -675,6 +895,12 @@ export const METRIC_RULES: Record<string, MetricRule> = {
     trendRecommendation: { improving: "Continue monitoring", stable: "Continue monitoring", worsening: "Movement away from normal — discuss with your doctor" },
     riskContributions: { anemia: 25 },
     personalized: { byGender: { male: { min: 30, max: 300 }, female: { min: 12, max: 150 } } },
+    source: {
+      source: "WHO",
+      year: 2011,
+      reference: "Iron deficiency typically <12–15 ng/mL (age/sex dependent)",
+      review: true,
+    },
   },
 };
 
