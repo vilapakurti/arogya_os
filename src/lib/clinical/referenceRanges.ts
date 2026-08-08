@@ -34,8 +34,10 @@ const SENIOR_CREATININE_MAX = 1.1;
 /**
  * Normalizes a unit string into a lookup key: lowercase, no whitespace,
  * and "µ"/"μ" folded to "u" so "µmol/L" and "umol/L" resolve identically.
+ * Exported so the emergency checks in clinicalEngine.ts compare thresholds
+ * using the exact same normalization.
  */
-function unitKey(unit: string | null | undefined): string | null {
+export function unitKey(unit: string | null | undefined): string | null {
   if (!unit || !unit.trim()) return null;
   return unit.trim().toLowerCase().replace(/\s+/g, "").replace(/[µμ]/g, "u");
 }

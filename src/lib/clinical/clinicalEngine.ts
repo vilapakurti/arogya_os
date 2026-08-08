@@ -19,10 +19,12 @@ import {
   getRule,
   lowerIsBetter,
   metricLabel,
+  type MetricRule,
 } from "./clinicalRules";
 import {
   combineWithPersonalBaseline,
   getReferenceRange,
+  unitKey,
 } from "./referenceRanges";
 import {
   evaluateRisk,
@@ -157,6 +159,26 @@ export function evaluateTrend(
 /* ------------------------------------------------------------------ */
 
 /**
+ * Converts a reading into the rule's canonical unit so emergency thresholds
+ * (always declared in the rule unit) can be compared safely. Returns null
+ * when the value is missing or the report's unit cannot be converted — in
+ * that case no emergency is flagged rather than comparing mismatched units
+ * (e.g. glucose 8.0 mmol/L must never be compared against a 40 mg/dL bound).
+ */
+function emergencyValueInRuleUnit(
+  input: MetricInput,
+  rule: MetricRule,
+): number | null {
+  if (input.value === null || !Number.isFinite(input.value)) return null;
+  const inputUnit = unitKey(input.unit);
+  const ruleUnit = unitKey(rule.unit);
+  if (!inputUnit || !ruleUnit || inputUnit === ruleUnit) return input.value;
+  const factor = rule.unitConversions?.[inputUnit];
+  if (factor === undefined || factor === 0) return null;
+  return input.value / factor;
+}
+
+/**
  * Detects immediately critical values (potassium, sodium, glucose,
  * creatinine, troponin, hemoglobin, platelets, oxygen saturation,
  * hypertensive blood pressure, very high triglycerides, …).
@@ -164,11 +186,11 @@ export function evaluateTrend(
 export function evaluateEmergency(inputs: MetricInput[]): EmergencyFinding[] {
   const findings: EmergencyFinding[] = [];
   for (const input of inputs) {
-    if (input.value === null || !Number.isFinite(input.value)) continue;
     const rule = getRule(input.metricName);
     const em = rule.emergency;
     if (!em) continue;
-    const value = input.value;
+    const value = emergencyValueInRuleUnit(input, rule);
+    if (value === null) continue;
     let triggered = false;
     if (em.min !== undefined && value < em.min) triggered = true;
     if (em.max !== undefined && value > em.max) triggered = true;
@@ -176,7 +198,7 @@ export function evaluateEmergency(inputs: MetricInput[]): EmergencyFinding[] {
     findings.push({
       metricName: input.metricName,
       label: metricLabel(input.metricName),
-      value,
+      value: input.value,
       flag: em.flag,
       message: em.message,
       immediateDoctorReview: true,
@@ -233,7 +255,12 @@ export function evaluateMetric(
   }
   if (rule.emergency && value !== null) {
     const em = rule.emergency;
-    if ((em.min !== undefined && value < em.min) || (em.max !== undefined && value > em.max)) {
+    const emValue = emergencyValueInRuleUnit(input, rule);
+    if (
+      emValue !== null &&
+      ((em.min !== undefined && emValue < em.min) ||
+        (em.max !== undefined && emValue > em.max))
+    ) {
       status = "critical";
     }
   }
@@ -262,12 +289,15 @@ export function evaluateMetric(
   );
 
   // ---- clinical meaning ----
-  const baseMeaning = unclassified
-    ? `No reference range is available for ${label} (value ${value} ${unit ?? ""}), so it cannot be classified at this time.`
-    : rule.meanings[status] ??
-      (value === null
-        ? "No reading available for this metric."
-        : `Value ${value} ${unit ?? ""} — ${status} relative to the reference range.`);
+  // A missing reading is NOT a normal result — never fall through to the
+  // "Within the expected range" text for a metric with no value.
+  const baseMeaning =
+    value === null
+      ? "No reading available for this metric."
+      : unclassified
+        ? `No reference range is available for ${label} (value ${value} ${unit ?? ""}), so it cannot be classified at this time.`
+        : rule.meanings[status] ??
+          `Value ${value} ${unit ?? ""} — ${status} relative to the reference range.`;
   const clinicalMeaning =
     baseMeaning + (earlyWarning ? ` ${earlyWarning}` : "");
 

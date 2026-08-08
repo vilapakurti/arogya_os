@@ -28,8 +28,10 @@
  *  - trendMeaning             what increasing / decreasing implies clinically
  *  - trendRecommendation      recommendation when the trend is improving /
  *                             stable / worsening
- *  - emergency                absolute critical thresholds (flagged regardless
- *                             of the personalized range)
+ *  - emergency                absolute critical thresholds, in the rule's
+ *                             canonical unit (min = critical below, max =
+ *                             critical above), flagged regardless of the
+ *                             personalized range
  *  - riskContributions        weights fed to the risk engine per status level
  *  - personalized             reference-range adjustments per demographics
  *  - unitConversions          rule-unit → report-unit numeric multipliers
@@ -99,6 +101,15 @@ export interface MetricRule {
   recommendations: Partial<Record<StatusLevel, string[]>>;
   trendMeaning: { increasing: string; decreasing: string };
   trendRecommendation: { improving: string; stable: string; worsening: string };
+  /**
+   * Absolute critical thresholds, always expressed in the rule's canonical
+   * unit (converted when a report uses another unit):
+   *   min — critical when the value is BELOW min (e.g. Hb < 7 g/dL)
+   *   max — critical when the value is ABOVE max (e.g. K+ > 6.5 mmol/L)
+   * These are emergency cut-offs, distinct from the reference range. A
+   * critically-LOW condition (hemoglobin, platelets, oxygen saturation) must
+   * be declared with `min`, never with `max`.
+   */
   emergency?: { min?: number; max?: number; flag: string; message: string };
   riskContributions?: Partial<Record<RiskCategoryKey, number>>;
   /** Reference-range personalization. */
@@ -158,8 +169,7 @@ export const METRIC_RULES: Record<string, MetricRule> = {
       worsening: "Trending away from normal — worth discussing with your doctor",
     },
     emergency: {
-      min: undefined,
-      max: 7,
+      min: 7,
       flag: "critically_low_hemoglobin",
       message: "Hemoglobin is critically low — seek immediate medical attention.",
     },
@@ -269,8 +279,7 @@ export const METRIC_RULES: Record<string, MetricRule> = {
     trendMeaning: { increasing: "Platelets are rising", decreasing: "Platelets are falling" },
     trendRecommendation: { improving: "Continue monitoring", stable: "Continue monitoring", worsening: "Worth discussing with your doctor" },
     emergency: {
-      min: undefined,
-      max: 20,
+      min: 20,
       flag: "critically_low_platelets",
       message: "Platelets are critically low — risk of bleeding. Seek immediate medical attention.",
     },
@@ -697,7 +706,11 @@ export const METRIC_RULES: Record<string, MetricRule> = {
     recommendations: { low: ["Seek medical evaluation"] },
     trendMeaning: { increasing: "Oxygen saturation is improving", decreasing: "Oxygen saturation is falling" },
     trendRecommendation: { improving: "Improving — continue monitoring", stable: "Continue monitoring", worsening: "Falling oxygen saturation — seek medical evaluation" },
-    emergency: { min: undefined, max: 85, flag: "low_oxygen_saturation", message: "Oxygen saturation is critically low — seek immediate medical attention." },
+    emergency: {
+      min: 85,
+      flag: "low_oxygen_saturation",
+      message: "Oxygen saturation is critically low — seek immediate medical attention.",
+    },
     source: {
       source: "General respiratory reference",
       reference: "Normal ≥95%; hypoxemia <90%; <85 severe",
